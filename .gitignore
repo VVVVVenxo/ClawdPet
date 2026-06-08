@@ -1,0 +1,16 @@
+.pio
+.vscode/
+.claude/
+tools/achievements.json
+tools/daemon.log
+tools/daemon.err
+tools/notif_debug.log
+tools/__pycache__/
+__pycache__/
+*.pyc
+src/anim/*.bin
+src/anim/frames.h
+src/anim/*.bak
+_pack_helper.py
+pack.bat
+Asset/
