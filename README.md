@@ -5,7 +5,7 @@
   <img src="src/anim/cheer.gif" width="120" alt="cheer" />
 </p>
 
-<h1 align="center">NoaPet</h1>
+<h1 align="center">ClawdPet</h1>
 
 <p align="center">
   <strong>Your AI coding buddy, alive on a tiny screen.</strong>
@@ -76,23 +76,23 @@ Add to your `~/.claude/settings.json`:
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "command": "python /path/to/NoaPet/tools/noapet_hook.py" }
+      { "command": "python /path/to/ClawdPet/tools/clawdpet_hook.py" }
     ],
     "Stop": [
-      { "command": "python /path/to/NoaPet/tools/noapet_hook.py" }
+      { "command": "python /path/to/ClawdPet/tools/clawdpet_hook.py" }
     ],
     "SessionStart": [
-      { "command": "python /path/to/NoaPet/tools/noapet_hook.py" }
+      { "command": "python /path/to/ClawdPet/tools/clawdpet_hook.py" }
     ],
     "SessionEnd": [
-      { "command": "python /path/to/NoaPet/tools/noapet_hook.py" }
+      { "command": "python /path/to/ClawdPet/tools/clawdpet_hook.py" }
     ],
     "Notification": [
-      { "matcher": "idle_prompt", "command": "python /path/to/NoaPet/tools/noapet_hook.py NotificationIdle" },
-      { "matcher": "choosing", "command": "python /path/to/NoaPet/tools/noapet_hook.py NotificationChoosing" }
+      { "matcher": "idle_prompt", "command": "python /path/to/ClawdPet/tools/clawdpet_hook.py NotificationIdle" },
+      { "matcher": "choosing", "command": "python /path/to/ClawdPet/tools/clawdpet_hook.py NotificationChoosing" }
     ],
     "PostToolUse": [
-      { "command": "python /path/to/NoaPet/tools/noapet_hook.py" }
+      { "command": "python /path/to/ClawdPet/tools/clawdpet_hook.py" }
     ]
   }
 }
@@ -155,12 +155,12 @@ The daemon starts automatically on first hook event. Your pet is alive.
 ## Project Structure
 
 ```
-NoaPet/
+ClawdPet/
 ├── src/main.cpp              # Firmware (rendering + protocol + mood)
 ├── src/anim/*.gif            # 16 embedded pixel animations
-├── tools/noapet_daemon.py    # PC daemon (serial + TCP + state aggregation)
-├── tools/noapet_hook.py      # Claude Code hook bridge
-├── tools/noapet_send.py      # Manual control CLI
+├── tools/clawdpet_daemon.py    # PC daemon (serial + TCP + state aggregation)
+├── tools/clawdpet_hook.py      # Claude Code hook bridge
+├── tools/clawdpet_send.py      # Manual control CLI
 ├── tools/task_state_manager.py  # Pure-logic state machine (testable)
 ├── tools/flash.sh            # One-click flash script
 ├── platformio.ini            # Build config

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================================
-# noapet_daemon.py - 常驻守护进程
+# clawdpet_daemon.py - 常驻守护进程
 #
 # 职责:
 #   - 独占串口 (Windows 下 COM 口同一时刻只能被一个进程打开)
@@ -14,8 +14,8 @@
 #   - 手动/异常                     -> error
 #
 # 依赖: pyserial  (pip install pyserial)
-# 运行: python noapet_daemon.py           # 自动探测 303A: 设备
-#       python noapet_daemon.py --port COM4
+# 运行: python clawdpet_daemon.py           # 自动探测 303A: 设备
+#       python clawdpet_daemon.py --port COM4
 # ============================================================================
 
 import argparse

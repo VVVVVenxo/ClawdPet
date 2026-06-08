@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================================
-# tools/flash.sh - NoaPet 一键烧录
+# tools/flash.sh - ClawdPet 一键烧录
 #
 # 解决的核心问题:
-#   其他 Claude Code 窗口的 hook 会不断把 noapet_daemon 拉起来独占 COM 口,
+#   其他 Claude Code 窗口的 hook 会不断把 clawdpet_daemon 拉起来独占 COM 口,
 #   导致 esptool 打开串口时报 "port is busy"。本脚本在 upload 期间于后台
 #   持续清场 (杀掉任何重生的 daemon), 保证 esptool 开口那一刻串口空闲。
 #
@@ -34,10 +34,10 @@ if [ -z "$PORT" ]; then
 fi
 echo "[flash] 目标端口: $PORT"
 
-# --- 后台清场: 持续杀掉重生的 noapet_daemon, 让串口保持空闲 ---
+# --- 后台清场: 持续杀掉重生的 clawdpet_daemon, 让串口保持空闲 ---
 kill_daemons() {
   for pid in $(wmic process where "name='python.exe'" get ProcessId,CommandLine 2>/dev/null \
-               | grep -i noapet_daemon | grep -oE '[0-9]+ *$' | tr -d ' '); do
+               | grep -i clawdpet_daemon | grep -oE '[0-9]+ *$' | tr -d ' '); do
     taskkill //PID "$pid" //F >/dev/null 2>&1
   done
 }

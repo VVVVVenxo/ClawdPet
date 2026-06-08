@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================================
-# noapet_send.py - 手动发送状态 (调试 / 异常上报)
+# clawdpet_send.py - 手动发送状态 (调试 / 异常上报)
 #
 # 用法:
-#   python noapet_send.py working        # 通过守护进程发 (推荐, 多窗口安全)
-#   python noapet_send.py error
-#   python noapet_send.py done --direct  # 绕过守护直接开串口 (守护没跑时)
-#   python noapet_send.py rename <name> [--sid SESSION_ID]
+#   python clawdpet_send.py working        # 通过守护进程发 (推荐, 多窗口安全)
+#   python clawdpet_send.py error
+#   python clawdpet_send.py done --direct  # 绕过守护直接开串口 (守护没跑时)
+#   python clawdpet_send.py rename <name> [--sid SESSION_ID]
 #                                         # 给某终端(默认本会话)改显示名
 #
 # 状态: idle | working | done | all_done | error

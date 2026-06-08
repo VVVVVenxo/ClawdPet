@@ -1,5 +1,5 @@
 // ============================================================================
-// NoaPet - Claude Code CLI 状态电子宠物
+// ClawdPet - Claude Code CLI 状态电子宠物
 // M5Unified + 竖屏 135x240 + USB Serial(115200) + 全屏 GIF 动画 + UI 叠加层
 //
 // 4 个状态各一段 GIF (240x240, 像素风), 嵌入固件, AnimatedGIF 实时解码到
@@ -970,11 +970,11 @@ void setup() {
   if (!g_frameBuf) Serial.println("[gif] FATAL: frame buffer alloc failed");
 
   Serial.println();
-  Serial.println("[NoaPet] boot ok");
-  Serial.printf("[NoaPet] display=%dx%d psram=%u\n",
+  Serial.println("[ClawdPet] boot ok");
+  Serial.printf("[ClawdPet] display=%dx%d psram=%u\n",
                 M5.Display.width(), M5.Display.height(),
                 (unsigned)ESP.getPsramSize());
-  Serial.println("[NoaPet] cmds: idle|working|choosing|done|all_done|error | "
+  Serial.println("[ClawdPet] cmds: idle|working|choosing|done|all_done|error | "
                  "#stat T=.. W=.. D=.. | #work a|b | #wait a|b | #time HH:MM | ping");
 
   pollBattery();

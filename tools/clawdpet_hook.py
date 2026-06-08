@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================================
-# noapet_hook.py - 极轻量 hook 桥接 (被 Claude Code hooks 调用)
+# clawdpet_hook.py - 极轻量 hook 桥接 (被 Claude Code hooks 调用)
 #
 # 行为:
 #   - 从 stdin 读取 Claude Code 传入的 hook JSON (含 session_id)
@@ -11,12 +11,12 @@
 # 设计要点: 必须快速返回、绝不阻塞 Claude Code, 任何异常都静默退出 0。
 #
 # Claude Code settings.json 里这样调用:
-#   "command": "python G:/xueluoCode/NoaPet/tools/noapet_hook.py"
+#   "command": "python G:/xueluoCode/ClawdPet/tools/clawdpet_hook.py"
 # 事件名自动从 stdin 的 hook_event_name 读取, 无需写死。
 #
 # 特例: Notification(idle_prompt) 无法从 stdin JSON 可靠区分通知种类,
 #       故在 settings.json 用 matcher=idle_prompt 过滤, 并显式传 argv:
-#   "command": "python .../noapet_hook.py NotificationIdle"
+#   "command": "python .../clawdpet_hook.py NotificationIdle"
 # 这样 daemon 只在收到明确的 NotificationIdle 事件时回落空闲。
 # ============================================================================
 
@@ -30,7 +30,7 @@ import time
 HOST = "127.0.0.1"
 PORT = 8787
 DAEMON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                      "noapet_daemon.py")
+                      "clawdpet_daemon.py")
 
 
 def send(payload, timeout=0.5):
@@ -74,8 +74,8 @@ def main():
 
     event = sys.argv[1] if len(sys.argv) > 1 else data.get("hook_event_name", "")
     cwd = data.get("cwd", "")
-    # 终端显示名: claude-pass <name> 注入的 NOAPET_NAME 优先, 否则回落 cwd 目录名
-    name = os.environ.get("NOAPET_NAME", "").strip()
+    # 终端显示名: claude-pass <name> 注入的 CLAWDPET_NAME 优先, 否则回落 cwd 目录名
+    name = os.environ.get("CLAWDPET_NAME", "").strip()
     if not name and cwd:
         name = os.path.basename(cwd.rstrip("/\\"))
     payload = {
