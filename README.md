@@ -41,7 +41,9 @@ A pixel-art desk pet that lives on an **M5StickS3** and reacts to your [Claude C
 🏆 **Achievements** — Unlock "HAT TRICK", "ON FIRE", "MARATHON" and more  
 🎉 **Festival Surprises** — Holiday greetings on special dates  
 ❤️ **Mood System** — Visible mood indicator, decays when idle, recovers when coding  
-👆 **Poke Interaction** — Tap the button for a random encouragement (re-tap to switch!)  
+👆 **Poke** — Short-press BtnA for encouragement (re-tap to switch!)  
+🍔 **Feed** — Long-press BtnA to feed your pet (mood +20, eating animation)  
+📳 **Shake** — Shake the device and watch your pet get dizzy  
 🪟 **Multi-Window** — Aggregates all Claude Code sessions into one display  
 ⏱️ **Auto-Cleanup** — Stale sessions auto-removed after 90s of inactivity  
 
@@ -124,7 +126,9 @@ The daemon starts automatically on first hook event. Your pet is alive.
 ```
 
 **BtnB** cycles pages: `Pet → Details → Tokens`  
-**BtnA** pokes the pet (random animation + encouragement)
+**BtnA short-press** pokes the pet (random animation + encouragement)  
+**BtnA long-press** feeds the pet (mood +20, eating animation)  
+**Shake** the device → dizzy reaction (mood -5)
 
 ---
 

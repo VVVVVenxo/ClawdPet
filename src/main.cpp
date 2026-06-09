@@ -223,6 +223,32 @@ static uint32_t g_pokeStartMs  = 0;
 static const uint32_t POKE_DURATION_MS = 3000;
 static const char* g_pokePhrase = nullptr;
 
+// --- 摇一摇互动 ---
+static int      g_shakeCount   = 0;
+static bool     g_shakeActive  = false;
+static uint32_t g_shakeStartMs = 0;
+static const float SHAKE_THRESHOLD = 2.0f;
+static const int   SHAKE_FRAMES   = 3;
+static const uint32_t SHAKE_DURATION_MS = 3000;
+static const char* g_shakePhrase = nullptr;
+static const char* kShakePhrases[] = { "dizzy!", "woah!", "hey!!", "stooop!" };
+static const int SHAKE_PHRASE_COUNT = 4;
+
+// --- 长按喂食 ---
+static bool     g_feedActive   = false;
+static uint32_t g_feedStartMs  = 0;
+static const uint32_t FEED_DURATION_MS = 4000;
+static const char* g_feedPhrase = nullptr;
+static const char* kFeedPhrases[] = { "yummy!", "nom nom!", "thanks!", "more!" };
+static const int FEED_PHRASE_COUNT = 4;
+
+// --- 翻转待机 (已禁用) ---
+
+// --- 互动状态统一判断 ---
+static bool isInteracting() {
+  return g_pokeActive || g_shakeActive || g_feedActive;
+}
+
 // --- 今日统计 ---
 static int      g_todayDone    = 0;
 
@@ -464,6 +490,36 @@ static void drawBubbleOverlay() {
   int bw = SCR_W - pad * 2;
   int bh = BUBBLE_H - 18;
   int r  = 10;
+
+  // 摇一摇模式: 特殊气泡
+  if (g_shakeActive && g_shakePhrase) {
+    uint16_t col = g_canvas.color565(255, 100, 100);  // 红
+    g_canvas.drawRoundRect(bx, by, bw, bh, r, col);
+    int tipX = SCR_W / 2;
+    int tailTop = by + bh;
+    g_canvas.drawLine(tipX - 8, tailTop, tipX, tailTop + 9, col);
+    g_canvas.drawLine(tipX + 8, tailTop, tipX, tailTop + 9, col);
+    g_canvas.setTextSize(2);
+    g_canvas.setTextColor(col);
+    g_canvas.setTextDatum(middle_center);
+    g_canvas.drawString(g_shakePhrase, SCR_W / 2, by + bh / 2);
+    return;
+  }
+
+  // 喂食模式: 特殊气泡
+  if (g_feedActive && g_feedPhrase) {
+    uint16_t col = g_canvas.color565(255, 150, 200);  // 粉
+    g_canvas.drawRoundRect(bx, by, bw, bh, r, col);
+    int tipX = SCR_W / 2;
+    int tailTop = by + bh;
+    g_canvas.drawLine(tipX - 8, tailTop, tipX, tailTop + 9, col);
+    g_canvas.drawLine(tipX + 8, tailTop, tipX, tailTop + 9, col);
+    g_canvas.setTextSize(2);
+    g_canvas.setTextColor(col);
+    g_canvas.setTextDatum(middle_center);
+    g_canvas.drawString(g_feedPhrase, SCR_W / 2, by + bh / 2);
+    return;
+  }
 
   // 戳一戳模式: 特殊气泡
   if (g_pokeActive && g_pokePhrase) {
@@ -1061,9 +1117,9 @@ void setup() {
 
   Serial.println();
   Serial.println("[ClawdPet] boot ok");
-  Serial.printf("[ClawdPet] display=%dx%d psram=%u\n",
+  Serial.printf("[ClawdPet] display=%dx%d psram=%u imu=%d\n",
                 M5.Display.width(), M5.Display.height(),
-                (unsigned)ESP.getPsramSize());
+                (unsigned)ESP.getPsramSize(), M5.Imu.getType());
   Serial.println("[ClawdPet] cmds: idle|working|choosing|done|all_done|error | "
                  "#stat T=.. W=.. D=.. | #work a|b | #wait a|b | #time HH:MM | ping");
 
@@ -1134,6 +1190,49 @@ void loop() {
   case Page::MAIN:
   default: {
 
+    // --- IMU 读取 + 摇一摇 / 翻转检测 ---
+    if (M5.Imu.isEnabled()) {
+      M5.Imu.update();
+      float ax, ay, az;
+      M5.Imu.getAccel(&ax, &ay, &az);
+
+      // 摇一摇检测: 合加速度 > 阈值
+      if (!isInteracting()) {
+        float mag = sqrtf(ax * ax + ay * ay + az * az);
+        if (mag > SHAKE_THRESHOLD) {
+          g_shakeCount++;
+          if (g_shakeCount >= SHAKE_FRAMES) {
+            g_shakeCount = 0;
+            g_shakeActive  = true;
+            g_shakeStartMs = millis();
+            g_shakePhrase  = kShakePhrases[esp_random() % SHAKE_PHRASE_COUNT];
+            g_mood = max(0, g_mood - 5);
+            closeGif();
+            const GifEntry& pe = kPokeGifs[esp_random() % POKE_GIF_COUNT];
+            size_t sz = pe.end - pe.start;
+            if (g_frameBuf && g_gif.open((uint8_t*)pe.start, (int)sz, gifDraw)) {
+              g_gif.setDrawType(GIF_DRAW_COOKED);
+              g_gif.setFrameBuf(g_frameBuf);
+              g_gifOpen = true;
+              g_frameDelayMs = 50;
+              g_lastFrameMs  = 0;
+              g_canvas.fillScreen(BG_COLOR);
+            }
+            markDirty();
+          }
+        } else {
+          g_shakeCount = 0;
+        }
+      }
+    }
+
+    // 摇一摇超时恢复
+    if (g_shakeActive && (millis() - g_shakeStartMs) >= SHAKE_DURATION_MS) {
+      g_shakeActive = false;
+      g_shakePhrase = nullptr;
+      openGifForState();
+    }
+
     // 心情衰减: idle 30 分钟后开始, 每 30 分钟 -10, 最低 10
     if (g_state == PetState::IDLE && (millis() - g_lastMoodDecay) >= 1800000UL) {
       g_lastMoodDecay = millis();
@@ -1179,8 +1278,28 @@ void loop() {
       }
     }
 
-    // BtnA: 短按=戳一戳 (poke 播放中再按则切换新动画+重置计时)
-    if (M5.BtnA.wasClicked()) {
+    // BtnA 长按=喂食
+    if (M5.BtnA.wasHold() && !g_shakeActive && !g_feedActive) {
+      g_feedActive  = true;
+      g_feedStartMs = millis();
+      g_feedPhrase  = kFeedPhrases[esp_random() % FEED_PHRASE_COUNT];
+      g_mood = min(100, g_mood + 20);
+      markDirty();
+      closeGif();
+      // 播放 eating GIF
+      size_t sz = eating_gif_end - eating_gif_start;
+      if (g_frameBuf && g_gif.open((uint8_t*)eating_gif_start, (int)sz, gifDraw)) {
+        g_gif.setDrawType(GIF_DRAW_COOKED);
+        g_gif.setFrameBuf(g_frameBuf);
+        g_gifOpen = true;
+        g_frameDelayMs = 50;
+        g_lastFrameMs  = 0;
+        g_canvas.fillScreen(BG_COLOR);
+      }
+    }
+
+    // BtnA 短按=戳一戳 (不在喂食/摇晃中才触发)
+    if (M5.BtnA.wasClicked() && !g_shakeActive && !g_feedActive) {
       g_mood = min(100, g_mood + 5);
       markDirty();
       g_pokeActive  = true;
@@ -1197,6 +1316,13 @@ void loop() {
         g_lastFrameMs  = 0;
         g_canvas.fillScreen(BG_COLOR);
       }
+    }
+
+    // 喂食超时恢复
+    if (g_feedActive && (millis() - g_feedStartMs) >= FEED_DURATION_MS) {
+      g_feedActive = false;
+      g_feedPhrase = nullptr;
+      openGifForState();
     }
 
     // 戳一戳/节日超时恢复

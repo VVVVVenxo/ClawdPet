@@ -269,6 +269,24 @@ BtnA 短按触发：
 - **方案**：daemon 的 `time_loop` 每分钟扫描，session 处于 running/waiting 超过 90 秒无新事件 → 自动标记 idle
 - 与 `idle_prompt` 通知（60 秒）互为兜底，谁先触发谁生效
 
+### 4.8 IMU 物理互动
+设备内置 IMU（加速度计），启用两种物理交互：
+
+**摇一摇**：
+- `M5.Imu.getAccel()` 每帧读取加速度，计算合加速度向量模 `sqrt(x²+y²+z²)`
+- 超过 2G 连续 3 帧 → 判定为摇晃
+- 触发：随机 GIF + 红色气泡 "dizzy!" / "woah!" / "hey!!" / "stooop!"
+- 心情 -5（别摇人家！），3 秒后恢复
+- 与 poke/feed 互斥
+
+**长按喂食**：
+- `M5.BtnA.wasHold()` 长按超 500ms 触发（`setHoldThresh` 可调）
+- 触发：eating.gif + 粉色气泡 "yummy!" / "nom nom!" / "thanks!" / "more!"
+- 心情 +20，4 秒后恢复
+- 短按仍是戳一戳（`wasClicked` 和 `wasHold` 是独立事件）
+
+📚 学：M5Unified IMU API（`Imu.update()` + `getAccel()`）、按钮状态机（click vs hold）。
+
 ---
 
 ## 5. 工具链与工作流知识
