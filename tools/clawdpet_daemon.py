@@ -41,6 +41,7 @@ ESP_VID = 0x303A           # Espressif USB VID (StickS3)
 DONE_PULSE_SEC = 2.0       # done 提示停留时间, 之后回到聚合状态
 IDLE_AFTER_SEC = 360.0     # all_done 后多久回落 idle
 RECONNECT_POLL_SEC = 1.0   # 串口断开后, 轮询设备重新出现的间隔
+STALE_SESSION_SEC = 90.0   # session 超过此时间无新事件则自动回落 idle
 WRITE_TIMEOUT_SEC = 2.0    # 写串口超时 (锁屏挂起 USB 时防止 write 永久阻塞)
 MAX_HISTORY = 8            # 最多保留的完成历史记录条数
 
@@ -443,6 +444,7 @@ class Daemon:
             try:
                 self.push_time()
                 self._check_festival()
+                self._reap_stale_sessions()
                 # 每分钟刷新 #sess 避免详情页时长漂移
                 with self.lock:
                     self.last_sess = None
@@ -450,6 +452,20 @@ class Daemon:
                 self.push_tok()
             except Exception as e:
                 self.log(f"time push error: {e}")
+
+    def _reap_stale_sessions(self):
+        now = time.time()
+        with self.lock:
+            snap = self.mgr.snapshot()
+            for sid, st in list(snap.items()):
+                if st not in ("running", "waiting"):
+                    continue
+                ts = self.state_timestamps.get(sid, now)
+                if (now - ts) >= STALE_SESSION_SEC:
+                    self.log(f"stale session {sid[:8]} ({st} for "
+                             f"{int(now - ts)}s), marking idle")
+                    self.mgr.idle_task(sid)
+                    self.state_timestamps.pop(sid, None)
 
     # --- TaskStateManager 状态变化回调: 写串口 + 安排回落定时器 ---
     def _on_state(self, state):

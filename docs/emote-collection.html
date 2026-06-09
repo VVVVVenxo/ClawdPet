@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>ClawdPet Emote Collection</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a1a2e;
+  font-family: 'Segoe UI', sans-serif;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  padding: 40px;
+}
+.card {
+  background: #16213e;
+  border-radius: 24px;
+  padding: 40px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  max-width: 820px;
+  width: 100%;
+}
+.header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+.header h1 {
+  color: #fff;
+  font-size: 28px;
+  letter-spacing: 2px;
+}
+.header h1 span { color: #f59e0b; }
+.header p {
+  color: #94a3b8;
+  font-size: 14px;
+  margin-top: 8px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+}
+.emote {
+  background: #0f3460;
+  border-radius: 12px;
+  padding: 8px;
+  text-align: center;
+  transition: transform 0.2s;
+}
+.emote:hover { transform: scale(1.05); }
+.emote img {
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  image-rendering: pixelated;
+}
+.emote .name {
+  color: #e2e8f0;
+  font-size: 11px;
+  margin-top: 6px;
+  font-weight: 500;
+}
+.footer {
+  text-align: center;
+  margin-top: 28px;
+  color: #64748b;
+  font-size: 12px;
+}
+.footer a { color: #f59e0b; text-decoration: none; }
+.badge {
+  display: inline-block;
+  background: #f59e0b;
+  color: #1a1a2e;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 99px;
+  margin-bottom: 12px;
+}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="header">
+    <div class="badge">24 EMOTES</div>
+    <h1><span>Clawd</span>Pet Emote Collection</h1>
+    <p>Pixel-art crab desk pet for M5StickS3 &times; Claude Code</p>
+  </div>
+  <div class="grid">
+    <div class="emote"><img src="../src/anim/emotes/clawd-coding.gif"><div class="name">coding</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-coffee.gif"><div class="name">coffee</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-reading.gif"><div class="name">reading</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-painting.gif"><div class="name">painting</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-guitar.gif"><div class="name">guitar</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-singing.gif"><div class="name">singing</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-gaming.gif"><div class="name">gaming</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-listening.gif"><div class="name">listening</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-photo.gif"><div class="name">photo</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-eating.gif"><div class="name">eating</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-exercise.gif"><div class="name">exercise</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-sleeping.gif"><div class="name">sleeping</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-shower.gif"><div class="name">shower</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-watering.gif"><div class="name">watering</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-dragon-boat.gif"><div class="name">dragon boat</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-lantern.gif"><div class="name">lantern</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-spring.gif"><div class="name">spring</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-mid-autumn.gif"><div class="name">mid-autumn</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-qixi.gif"><div class="name">qixi</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-christmas.gif"><div class="name">christmas</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-halloween.gif"><div class="name">halloween</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-valentine.gif"><div class="name">valentine</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-new-year.gif"><div class="name">new year</div></div>
+    <div class="emote"><img src="../src/anim/emotes/clawd-birthday.gif"><div class="name">birthday</div></div>
+  </div>
+  <div class="footer">
+    <a href="https://github.com/VVVVVenxo/ClawdPet">github.com/VVVVVenxo/ClawdPet</a> &bull; MIT License &bull; by Venox
+  </div>
+</div>
+</body>
+</html>

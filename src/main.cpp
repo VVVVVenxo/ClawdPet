@@ -21,6 +21,7 @@
 
 #include <M5Unified.h>
 #include <AnimatedGIF.h>
+#include <Preferences.h>
 
 enum class PetState { IDLE, WORKING, CHOOSING, DONE, ALL_DONE, ERROR };
 static const int STATE_COUNT = 6;
@@ -229,6 +230,82 @@ static int      g_todayDone    = 0;
 static int      g_mood = 70;
 static uint32_t g_lastMoodDecay = 0;
 
+// --- NVS 持久化 ---
+static Preferences g_prefs;
+static bool     g_saveDirty    = false;
+static uint32_t g_saveDirtyMs  = 0;
+static const uint32_t SAVE_DEBOUNCE_MS = 5000;
+
+static void markDirty() {
+  if (!g_saveDirty) {
+    g_saveDirty   = true;
+    g_saveDirtyMs = millis();
+  }
+}
+
+static void saveState() {
+  g_prefs.putInt("mood", g_mood);
+  g_prefs.putInt("todayDone", g_todayDone);
+  g_prefs.putInt("state", (int)g_state);
+  g_prefs.putInt("workCount", g_workCount);
+  for (int i = 0; i < g_workCount; i++) {
+    char key[8]; snprintf(key, sizeof(key), "work%d", i);
+    g_prefs.putString(key, g_workNames[i]);
+  }
+  g_prefs.putInt("waitCount", g_waitCount);
+  for (int i = 0; i < g_waitCount; i++) {
+    char key[8]; snprintf(key, sizeof(key), "wait%d", i);
+    g_prefs.putString(key, g_waitNames[i]);
+  }
+  g_prefs.putInt("sessCount", g_sessionCount);
+  for (int i = 0; i < g_sessionCount; i++) {
+    char key[8]; snprintf(key, sizeof(key), "sess%d", i);
+    String packed = g_sessions[i].name + ":" + String((char)g_sessions[i].state) + ":" + String(g_sessions[i].durSec);
+    g_prefs.putString(key, packed);
+  }
+  g_saveDirty = false;
+  Serial.println("[nvs] saved");
+}
+
+static void loadState() {
+  g_prefs.begin("clawdpet", false);
+  g_mood      = g_prefs.getInt("mood", 70);
+  g_todayDone = g_prefs.getInt("todayDone", 0);
+  g_state     = (PetState)g_prefs.getInt("state", 0);
+  g_workCount = g_prefs.getInt("workCount", 0);
+  for (int i = 0; i < g_workCount && i < MAX_WORK_NAMES; i++) {
+    char key[8]; snprintf(key, sizeof(key), "work%d", i);
+    g_workNames[i] = g_prefs.getString(key, "");
+  }
+  g_waitCount = g_prefs.getInt("waitCount", 0);
+  for (int i = 0; i < g_waitCount && i < MAX_WORK_NAMES; i++) {
+    char key[8]; snprintf(key, sizeof(key), "wait%d", i);
+    g_waitNames[i] = g_prefs.getString(key, "");
+  }
+  g_sessionCount = g_prefs.getInt("sessCount", 0);
+  uint32_t now = millis();
+  for (int i = 0; i < g_sessionCount && i < MAX_SESSIONS; i++) {
+    char key[8]; snprintf(key, sizeof(key), "sess%d", i);
+    String packed = g_prefs.getString(key, "");
+    int c1 = packed.indexOf(':');
+    int c2 = (c1 >= 0) ? packed.indexOf(':', c1 + 1) : -1;
+    if (c1 > 0 && c2 > c1) {
+      g_sessions[i].name   = packed.substring(0, c1);
+      g_sessions[i].state  = packed.charAt(c1 + 1);
+      g_sessions[i].durSec = packed.substring(c2 + 1).toInt();
+      g_sessions[i].recvMs = now;
+    }
+  }
+  Serial.printf("[nvs] loaded: mood=%d todayDone=%d state=%d work=%d sess=%d\n",
+                g_mood, g_todayDone, (int)g_state, g_workCount, g_sessionCount);
+}
+
+static void pollSave() {
+  if (g_saveDirty && (millis() - g_saveDirtyMs) >= SAVE_DEBOUNCE_MS) {
+    saveState();
+  }
+}
+
 static const uint8_t* gifDataForState(PetState s, size_t* outSize) {
   const GifPool& pool = kPools[(int)s];
   int idx = (pool.count > 1) ? (esp_random() % pool.count) : 0;
@@ -294,6 +371,12 @@ static void drawStatusBarOverlay() {
   g_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
   g_canvas.setTextDatum(top_left);
   g_canvas.drawString(ts, 4, 6);
+
+  // 中: 心情指示 (小圆点, 颜色随心情变化)
+  uint16_t moodCol = (g_mood > 70) ? g_canvas.color565(0, 200, 90)
+                   : (g_mood > 30) ? g_canvas.color565(230, 200, 0)
+                   : g_canvas.color565(150, 60, 60);
+  g_canvas.fillCircle(44, 9, 3, moodCol);
 
   // 右: 电池图标 + 百分比
   int pct = g_battLevel < 0 ? 0 : g_battLevel;
@@ -496,6 +579,7 @@ static void openGifForState() {
 static void applyState(PetState s) {
   g_state = s;
   g_lastMoodDecay = millis();
+  markDirty();
   Serial.printf("[state] -> %s\n", kStyles[(int)s].name);
   if (s == PetState::DONE || s == PetState::ALL_DONE) {
     g_mood = min(100, g_mood + 10);
@@ -540,6 +624,7 @@ static void handleWork(const String& raw) {
     if (bar < 0) break;
     start = bar + 1;
   }
+  markDirty();
 }
 
 static void handleWait(const String& raw) {
@@ -558,6 +643,7 @@ static void handleWait(const String& raw) {
     if (bar < 0) break;
     start = bar + 1;
   }
+  markDirty();
 }
 
 static void handleTime(const String& cmd) {
@@ -604,6 +690,7 @@ static void handleSess(const String& raw) {
     start = bar + 1;
   }
   g_detailDirty = true;
+  markDirty();
 }
 
 // --- #hist name:info|name:info|... ---
@@ -641,6 +728,7 @@ static void handleToday(const String& cmd) {
     g_todayDone = v;
   }
   g_detailDirty = true;
+  markDirty();
 }
 
 // --- #achv ACHIEVEMENT_NAME ---
@@ -969,6 +1057,8 @@ void setup() {
   g_frameBuf = (uint8_t*)ps_malloc(FRAME_BUF_SIZE);
   if (!g_frameBuf) Serial.println("[gif] FATAL: frame buffer alloc failed");
 
+  loadState();
+
   Serial.println();
   Serial.println("[ClawdPet] boot ok");
   Serial.printf("[ClawdPet] display=%dx%d psram=%u\n",
@@ -987,6 +1077,7 @@ void loop() {
 
   pollSerial();
   pollBattery();
+  pollSave();
 
   // BtnB: 三页循环切换 MAIN -> DETAIL -> TOKEN -> MAIN
   if (M5.BtnB.wasPressed()) {
@@ -1043,15 +1134,15 @@ void loop() {
   case Page::MAIN:
   default: {
 
-    // 心情衰减: idle 超 3h, 每小时 -5, 最低 10
-    if (g_state == PetState::IDLE && (millis() - g_lastMoodDecay) >= 3600000UL) {
+    // 心情衰减: idle 30 分钟后开始, 每 30 分钟 -10, 最低 10
+    if (g_state == PetState::IDLE && (millis() - g_lastMoodDecay) >= 1800000UL) {
       g_lastMoodDecay = millis();
-      if (g_mood > 10) g_mood = max(10, g_mood - 5);
+      if (g_mood > 10) { g_mood = max(10, g_mood - 10); markDirty(); }
     }
     // 工作中心情自动回升: 每分钟 +2
     if (g_state == PetState::WORKING && (millis() - g_lastMoodDecay) >= 60000UL) {
       g_lastMoodDecay = millis();
-      if (g_mood < 100) g_mood = min(100, g_mood + 2);
+      if (g_mood < 100) { g_mood = min(100, g_mood + 2); markDirty(); }
     }
     // 名字轮播: work+wait 超过 3 条时每 2s 翻页
     uint32_t tnow = millis();
@@ -1091,6 +1182,7 @@ void loop() {
     // BtnA: 短按=戳一戳 (poke 播放中再按则切换新动画+重置计时)
     if (M5.BtnA.wasClicked()) {
       g_mood = min(100, g_mood + 5);
+      markDirty();
       g_pokeActive  = true;
       g_pokeStartMs = millis();
       g_pokePhrase  = kPokePhrases[esp_random() % POKE_PHRASE_COUNT];

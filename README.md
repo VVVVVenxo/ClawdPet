@@ -37,11 +37,13 @@ A pixel-art desk pet that lives on an **M5StickS3** and reacts to your [Claude C
 🐾 **Live Status Sync** — Automatically tracks all Claude Code terminals via hooks  
 🎬 **16 Pixel Animations** — Random GIF pool per state, never the same twice  
 📊 **3-Page Dashboard** — Pet view / Session details / Token usage  
+💾 **Persistent State** — Mood, tasks, and stats survive reboots (NVS flash storage)  
 🏆 **Achievements** — Unlock "HAT TRICK", "ON FIRE", "MARATHON" and more  
 🎉 **Festival Surprises** — Holiday greetings on special dates  
-❤️ **Mood System** — Your pet gets bored if you don't code... or happy when you do  
-👆 **Poke Interaction** — Tap the button for a random encouragement  
+❤️ **Mood System** — Visible mood indicator, decays when idle, recovers when coding  
+👆 **Poke Interaction** — Tap the button for a random encouragement (re-tap to switch!)  
 🪟 **Multi-Window** — Aggregates all Claude Code sessions into one display  
+⏱️ **Auto-Cleanup** — Stale sessions auto-removed after 90s of inactivity  
 
 ---
 

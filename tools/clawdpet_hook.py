@@ -74,8 +74,11 @@ def main():
 
     event = sys.argv[1] if len(sys.argv) > 1 else data.get("hook_event_name", "")
     cwd = data.get("cwd", "")
-    # 终端显示名: claude-pass <name> 注入的 CLAWDPET_NAME 优先, 否则回落 cwd 目录名
-    name = os.environ.get("CLAWDPET_NAME", "").strip()
+    # 终端显示名: CLAWDPET_NAME 优先, 兼容旧变量名, 否则回落 cwd 目录名
+    name = (os.environ.get("CLAWDPET_NAME")
+            or os.environ.get("NOAPET_NAME")
+            or os.environ.get("NONOPET_NAME")
+            or "").strip()
     if not name and cwd:
         name = os.path.basename(cwd.rstrip("/\\"))
     payload = {
