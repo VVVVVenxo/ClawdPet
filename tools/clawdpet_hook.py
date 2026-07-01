@@ -31,6 +31,23 @@ HOST = "127.0.0.1"
 PORT = 8787
 DAEMON = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       "clawdpet_daemon.py")
+_HEX = set("0123456789abcdefABCDEF")
+
+
+def read_peacock_color(cwd):
+    """读 <cwd>/.vscode/settings.json 里的 peacock.color (#rrggbb), 返回 6 位小写 hex 或 ""。"""
+    if not cwd:
+        return ""
+    try:
+        with open(os.path.join(cwd, ".vscode", "settings.json"),
+                  "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        c = (cfg.get("peacock.color") or "").lstrip("#").strip()
+        if len(c) == 6 and all(ch in _HEX for ch in c):
+            return c.lower()
+    except Exception:
+        pass
+    return ""
 
 
 def send(payload, timeout=0.5):
@@ -81,11 +98,13 @@ def main():
             or "").strip()
     if not name and cwd:
         name = os.path.basename(cwd.rstrip("/\\"))
+    color = read_peacock_color(cwd)
     payload = {
         "event": event,
         "session_id": data.get("session_id", ""),
         "cwd": cwd,
         "name": name,
+        "color": color,
     }
 
     try:

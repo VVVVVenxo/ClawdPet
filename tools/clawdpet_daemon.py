@@ -76,6 +76,7 @@ class Daemon:
         self.timer = None
         self.last_stat = None                 # 上次发出的计数, 去重用
         self.names = {}                       # session_id -> 终端显示名
+        self.colors = {}                      # session_id -> peacock hex "rrggbb"
         self.renamed = set()                  # 手动 rename 过的 sid, hook 不覆盖
         self.last_work = None                 # 上次发出的工作名列表, 去重用
         self.last_wait = None                 # 上次发出的等待名列表, 去重用
@@ -257,7 +258,11 @@ class Daemon:
                 code = state_map.get(st, "?")
                 ts = self.state_timestamps.get(tid, now)
                 dur = max(0, int(now - ts))
-                parts.append(f"{name}:{code}:{dur}")
+                tok = f"{name}:{code}:{dur}"
+                col = self.colors.get(tid)
+                if col:
+                    tok += f":{col}"          # peacock 颜色 (6 位 hex)
+                parts.append(tok)
             line = "#sess " + "|".join(parts)
         if line == self.last_sess:
             return
@@ -508,7 +513,7 @@ class Daemon:
             self.push_today()
 
     # --- hook 事件 -> TaskStateManager API ---
-    def on_event(self, event, sid, name=""):
+    def on_event(self, event, sid, name="", color=""):
         with self.lock:
             if event == "rename":
                 # 手动 rename: 最高优先, 标记不被 hook 覆盖
@@ -517,6 +522,8 @@ class Daemon:
                     self.renamed.add(sid)
             elif name and sid not in self.renamed:
                 self.names[sid] = name
+            if color:
+                self.colors[sid] = color       # peacock 颜色 (空值不覆盖, 保留缓存)
 
             if event == "UserPromptSubmit":
                 self.mgr.start_task(sid)                 # -> working
@@ -530,6 +537,7 @@ class Daemon:
                 self.mgr.remove_task(sid)                # 无任务 -> idle
                 self.state_timestamps.pop(sid, None)
                 self.names.pop(sid, None)
+                self.colors.pop(sid, None)
                 self.renamed.discard(sid)
 
             elif event == "SubagentStop":
@@ -589,7 +597,9 @@ class Daemon:
             elif event == "PostToolUse":
                 old_st = self.mgr.snapshot().get(sid)
                 self.mgr.unwait_task(sid)
-                if old_st == "waiting":
+                # 工具仍在执行 -> 该 session 仍活跃, 刷新时间戳避免被 90s reaper 误判空闲。
+                # (旧版只在 waiting->running 转换时刷新, 长 running 任务会被误踢)
+                if old_st in ("running", "waiting"):
                     self.state_timestamps[sid] = time.time()
 
             elif event == "manual":
@@ -645,7 +655,8 @@ class Daemon:
             event = msg.get("event", "")
             sid = msg.get("session_id", "")
             name = msg.get("name", "")
-            self.on_event(event, sid, name)
+            color = msg.get("color", "")
+            self.on_event(event, sid, name, color)
             conn.sendall(b"ok")
         except Exception as e:
             self.log(f"conn error: {e}")

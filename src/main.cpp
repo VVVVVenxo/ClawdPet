@@ -109,6 +109,8 @@ struct SessionInfo {
   char     state;      // 'R','W','D','P','E'
   uint32_t durSec;
   uint32_t recvMs;     // millis() 收到时刻, 用于本地自增
+  uint16_t color;      // peacock 主题色 (RGB565), hasColor=false 时用默认白
+  bool     hasColor;
 };
 static SessionInfo g_sessions[MAX_SESSIONS];
 static int         g_sessionCount = 0;
@@ -720,6 +722,25 @@ static void handleTime(const String& cmd) {
   g_timeValid    = true;
 }
 
+// 把 6 位 hex "rrggbb" 转 RGB565; 非法返回 0 (表示无颜色)。
+static uint16_t parseHexColor(const String& hex) {
+  String h = hex;
+  h.trim();
+  if (h.startsWith("#")) h = h.substring(1);
+  if (h.length() != 6) return 0;
+  auto nv = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  int r = nv(h[0]) * 16 + nv(h[1]);
+  int g = nv(h[2]) * 16 + nv(h[3]);
+  int b = nv(h[4]) * 16 + nv(h[5]);
+  if (r < 0 || g < 0 || b < 0) return 0;
+  return g_canvas.color565(r, g, b);
+}
+
 // --- #sess name:state:dur|name:state:dur|... ---
 static void handleSess(const String& raw) {
   int sp = raw.indexOf(' ');
@@ -732,14 +753,23 @@ static void handleSess(const String& raw) {
   while (start <= (int)body.length() && g_sessionCount < MAX_SESSIONS) {
     int bar = body.indexOf('|', start);
     String tok = (bar < 0) ? body.substring(start) : body.substring(start, bar);
-    // parse "name:state:dur"
+    // parse "name:state:dur[:rrggbb]"
     int c1 = tok.indexOf(':');
     int c2 = (c1 >= 0) ? tok.indexOf(':', c1 + 1) : -1;
+    int c3 = (c2 >= 0) ? tok.indexOf(':', c2 + 1) : -1;
     if (c1 > 0 && c2 > c1) {
-      g_sessions[g_sessionCount].name   = tok.substring(0, c1);
-      g_sessions[g_sessionCount].state  = tok.charAt(c1 + 1);
-      g_sessions[g_sessionCount].durSec = tok.substring(c2 + 1).toInt();
-      g_sessions[g_sessionCount].recvMs = now;
+      SessionInfo& s = g_sessions[g_sessionCount];
+      s.name   = tok.substring(0, c1);
+      s.state  = tok.charAt(c1 + 1);
+      String durStr = (c3 > c2) ? tok.substring(c2 + 1, c3) : tok.substring(c2 + 1);
+      s.durSec = durStr.toInt();
+      s.recvMs = now;
+      s.hasColor = false;
+      s.color    = 0;
+      if (c3 > c2) {                            // 可选第 4 段: peacock 颜色
+        uint16_t col = parseHexColor(tok.substring(c3 + 1));
+        if (col) { s.color = col; s.hasColor = true; }
+      }
       g_sessionCount++;
     }
     if (bar < 0) break;
@@ -973,7 +1003,9 @@ static void drawDetailContent() {
       uint16_t col = stateColor(s.state);
       g_canvas.fillCircle(6, y + 5, 3, col);
       String nm = s.name.substring(0, 9);
-      g_canvas.setTextColor(TFT_WHITE, TFT_BLACK);
+      // 名字用 peacock 主题色 (无色回落白), 状态点保留状态色
+      uint16_t nameCol = s.hasColor ? s.color : TFT_WHITE;
+      g_canvas.setTextColor(nameCol, TFT_BLACK);
       g_canvas.setTextDatum(top_left);
       g_canvas.drawString(nm, 14, y);
       g_canvas.setTextColor(col, TFT_BLACK);
