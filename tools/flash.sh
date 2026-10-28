@@ -58,12 +58,14 @@ echo "[flash] 后台清场已启动 (含烧录锁 $LOCK_FILE), 开始构建并�
 "$PIO" run -e "$ENV_NAME" -t upload --upload-port "$PORT"
 RC=${PIPESTATUS[0]:-$?}
 
-rm -f "$LOCK_FILE"
 kill "$KILLER" 2>/dev/null
+wait "$KILLER" 2>/dev/null
+rm -f "$LOCK_FILE"
 trap - EXIT INT TERM
 
 if [ "$RC" -eq 0 ]; then
-  echo "[flash] 烧录成功。daemon 会在下次 hook 触发时自动重启。"
+  python "$PROJ_DIR/tools/clawdpet_hook.py" SessionStart </dev/null >/dev/null 2>&1 || true
+  echo "[flash] 烧录成功，已自动拉起 daemon 并同步实时时钟。"
 else
   echo "[flash] 烧录失败 (rc=$RC)。"
   echo "        若反复失败, 手动进下载模式: 按住 BOOT + 点 RESET → 松 RESET → 松 BOOT" >&2

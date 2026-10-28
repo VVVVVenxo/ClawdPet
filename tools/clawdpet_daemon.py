@@ -145,14 +145,23 @@ class Daemon:
             try:
                 ser = serial.Serial(port, BAUD, timeout=0.25,
                                     write_timeout=WRITE_TIMEOUT_SEC)
-                # 等待 ESP32-S3 完成启动打印 "boot ok" (最长等 2.2s)
+                # 发送 ping 握手或等待 ESP32-S3 完成启动打印 "boot ok" / "pong"
+                time.sleep(0.2)
+                try:
+                    ser.write(b"ping\n")
+                    ser.flush()
+                except Exception:
+                    pass
                 t0 = time.time()
-                while time.time() - t0 < 2.2:
+                while time.time() - t0 < 1.5:
                     line = ser.readline()
-                    if b"boot ok" in line:
-                        break
-                time.sleep(0.15)
-                ser.reset_input_buffer()
+                    if line:
+                        txt = line.decode("utf-8", errors="replace").strip()
+                        if txt:
+                            self.log(f"ESP32| {txt}")
+                        if b"boot ok" in line or b"pong" in line:
+                            break
+                time.sleep(0.1)
                 return ser, port
             except (serial.SerialException, OSError):
                 continue
@@ -169,19 +178,26 @@ class Daemon:
             pass
 
     def _serial_read_loop(self):
+        buf = b""
         while True:
-            ser = self.ser
-            if ser is None:
-                time.sleep(0.3)
-                continue
-            try:
-                raw = ser.readline()
-                if raw:
-                    txt = raw.decode("utf-8", errors="replace").strip()
+            chunk = b""
+            with self.ser_lock:
+                if self.ser is not None:
+                    try:
+                        n = self.ser.in_waiting
+                        if n > 0:
+                            chunk = self.ser.read(n)
+                    except Exception:
+                        pass
+            if chunk:
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    txt = line.decode("utf-8", errors="replace").strip()
                     if txt:
                         self.log(f"ESP32| {txt}")
-            except Exception:
-                time.sleep(0.3)
+            else:
+                time.sleep(0.15)
 
     # --- 串口写一行 (加锁; 任何线程都经此) ---
     # 写失败时关闭句柄并触发后台重连, 不抛给调用方。失败包括:

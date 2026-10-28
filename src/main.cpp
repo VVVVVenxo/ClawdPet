@@ -69,10 +69,17 @@ static int            g_waitCycle       = 0;
 static uint32_t       g_lastWaitCycleMs = 0;
 static const uint32_t WAIT_CYCLE_MS     = 1000;
 
-// 时间 (由 #time 校准; 设备无 RTC, 用 millis() 自走分钟)
-static bool     g_timeValid    = false;
-static int      g_baseMinOfDay = 0;     // 上次校时对应的当日分钟数 0..1439
-static uint32_t g_baseMillis   = 0;
+// 时间 (由 #time 校准; 启动时先用 NVS lastMin 或编译时间 __TIME__ 兜底, 永不显示 --:--)
+static int compileMinOfDay() {
+  int h = (__TIME__[0] - '0') * 10 + (__TIME__[1] - '0');
+  int m = (__TIME__[3] - '0') * 10 + (__TIME__[4] - '0');
+  if (h < 0 || h > 23 || m < 0 || m > 59) return 12 * 60;
+  return h * 60 + m;
+}
+static bool     g_timeValid       = true;
+static int      g_baseMinOfDay    = 0;     // 上次校时对应的当日分钟数 0..1439
+static uint32_t g_baseMillis      = 0;
+static int      g_lastNvsSavedMin = -1;
 
 // 电量 (固件本地轮询)
 static int      g_battLevel  = -1;
@@ -516,10 +523,13 @@ static void loadState() {
   g_exp        = constrain(g_prefs.getInt("exp", (g_todayDone * 25) % 100), 0, 99);
   int savedMin = g_prefs.getInt("lastMin", -1);
   if (savedMin >= 0 && savedMin < 1440) {
-    g_baseMinOfDay = savedMin;
-    g_baseMillis   = millis();
-    g_timeValid    = true;
+    g_baseMinOfDay    = savedMin;
+    g_lastNvsSavedMin = savedMin;
+  } else {
+    g_baseMinOfDay    = compileMinOfDay();
   }
+  g_baseMillis = millis();
+  g_timeValid  = true;
   g_state      = (PetState)g_prefs.getInt("state", 0);
   g_workCount  = g_prefs.getInt("workCount", 0);
   for (int i = 0; i < g_workCount && i < MAX_WORK_NAMES; i++) {
@@ -563,9 +573,9 @@ static void pollSave() {
 // 时间与格式化辅助
 // ---------------------------------------------------------------------------
 static int currentMinOfDay() {
-  if (!g_timeValid) return -1;
   uint32_t elapsedMin = (millis() - g_baseMillis) / 60000UL;
-  return (g_baseMinOfDay + (int)elapsedMin) % 1440;
+  int base = (g_baseMinOfDay >= 0 && g_baseMinOfDay < 1440) ? g_baseMinOfDay : compileMinOfDay();
+  return (base + (int)elapsedMin) % 1440;
 }
 
 static bool isNightTime() {
@@ -845,11 +855,12 @@ static void drawStatusBarOverlay() {
   g_canvas.setFont(nullptr);
   g_canvas.setTextSize(1);
 
-  // 左: 永远固定显示 24h 时间 (不再被番茄钟覆盖)
-  char ts[6];
+  // 左: 永远固定显示 24h 时间 (有编译时间与 NVS 兜底, 永不出现 --:--)
+  char ts[12];
   int m = currentMinOfDay();
-  if (m < 0) strcpy(ts, "--:--");
-  else       snprintf(ts, sizeof(ts), "%02d:%02d", m / 60, m % 60);
+  snprintf(ts, sizeof(ts), "%02d:%02d", m / 60, m % 60);
+  g_canvas.setFont(&fonts::Font0);
+  g_canvas.setTextSize(1);
   g_canvas.setTextColor(TFT_WHITE, colSurfaceAlt());
   g_canvas.setTextDatum(top_left);
   g_canvas.drawString(ts, 4, 5);
@@ -1718,13 +1729,20 @@ static void handleTime(const String& cmd) {
     h += (cmd[i] - '0') * hd; hd *= 10; i--; hg = true;
   }
   int j = colon + 1, m = 0; bool mg = false;
-  while (j < (int)cmd.length() && cmd[j] >= '0' && cmd[j] >= '9') {
+  while (j < (int)cmd.length() && cmd[j] >= '0' && cmd[j] <= '9') {
     m = m * 10 + (cmd[j] - '0'); j++; mg = true;
   }
   if (!hg || !mg || h > 23 || m > 59) return;
-  g_baseMinOfDay = h * 60 + m;
+  int newMin = h * 60 + m;
+  g_baseMinOfDay = newMin;
   g_baseMillis   = millis();
   g_timeValid    = true;
+  g_detailDirty  = true;
+  if (newMin != g_lastNvsSavedMin) {
+    g_lastNvsSavedMin = newMin;
+    g_prefs.putInt("lastMin", newMin);
+    Serial.printf("[time-ok] %02d:%02d min=%d (saved to NVS)\n", h, m, newMin);
+  }
 }
 
 static uint16_t parseHexColor(const String& hex) {
@@ -1797,7 +1815,6 @@ static void handleSess(const String& raw) {
     start = bar + 1;
   }
   g_detailDirty = true;
-  markDirty();
 }
 
 static void handleHist(const String& raw) {
