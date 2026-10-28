@@ -38,12 +38,27 @@ PORT = 8787                 # 本地 TCP 端口 (hook <-> daemon)
 BAUD = 115200
 ESP_VID = 0x303A           # Espressif USB VID (StickS3)
 
-DONE_PULSE_SEC = 2.0       # done 提示停留时间, 之后回到聚合状态
-IDLE_AFTER_SEC = 360.0     # all_done 后多久回落 idle
+DONE_PULSE_SEC = 2.5       # done 提示停留时间, 之后回到聚合状态
+IDLE_AFTER_SEC = 15.0      # all_done 庆祝后自动归档并回落 idle
 RECONNECT_POLL_SEC = 1.0   # 串口断开后, 轮询设备重新出现的间隔
 STALE_SESSION_SEC = 90.0   # session 超过此时间无新事件则自动回落 idle
 WRITE_TIMEOUT_SEC = 2.0    # 写串口超时 (锁屏挂起 USB 时防止 write 永久阻塞)
 MAX_HISTORY = 8            # 最多保留的完成历史记录条数
+
+AGENT_CODE_MAP = {
+    "claude": "C",
+    "codex": "X",
+    "pi": "P",
+    "c": "C",
+    "x": "X",
+    "p": "P",
+}
+
+
+def _clean_tok(val, max_len=12):
+    if not val:
+        return ""
+    return str(val).replace("|", "-").replace(":", "-").strip()[:max_len]
 
 
 def find_port(explicit=None):
@@ -77,6 +92,8 @@ class Daemon:
         self.last_stat = None                 # 上次发出的计数, 去重用
         self.names = {}                       # session_id -> 终端显示名
         self.colors = {}                      # session_id -> peacock hex "rrggbb"
+        self.agents = {}                      # session_id -> 'C' | 'X' | 'P'
+        self.tools = {}                       # session_id -> 当前执行的工具短名
         self.renamed = set()                  # 手动 rename 过的 sid, hook 不覆盖
         self.last_work = None                 # 上次发出的工作名列表, 去重用
         self.last_wait = None                 # 上次发出的等待名列表, 去重用
@@ -103,6 +120,10 @@ class Daemon:
 
         # Token 用量
         self.last_tok = None                  # 去重用
+
+        # 工具连击计数 (Combo)
+        self.combo_count = 0
+        self.last_combo_ts = 0.0
 
         # 聚合逻辑: 串口写入作为 emit 注入; done/all_done 由定时器回落
         self.mgr = TaskStateManager(emit=self._on_state)
@@ -207,21 +228,30 @@ class Daemon:
         except Exception as e:
             self.log(f"resync time/tok error: {e}")
 
-    # --- 计数行: 仅在变化时发 #stat T=.. W=.. D=.. ---
+    # --- 计数行: 仅在变化时发 #stat T=.. W=.. D=.. C=.. X=.. P=.. ---
     def push_stat(self):
         c = self.mgr.counts()
-        key = (c["total"], c["work"], c["done"])
+        snap = self.mgr.snapshot()
+        c_act = sum(1 for tid, st in snap.items()
+                    if st in ("running", "waiting") and self.agents.get(tid, "C") == "C")
+        x_act = sum(1 for tid, st in snap.items()
+                    if st in ("running", "waiting") and self.agents.get(tid) == "X")
+        p_act = sum(1 for tid, st in snap.items()
+                    if st in ("running", "waiting") and self.agents.get(tid) == "P")
+        key = (c["total"], c["work"], c["done"], c_act, x_act, p_act)
         if key == self.last_stat:
             return
         self.last_stat = key
-        self._write_line(f"#stat T={c['total']} W={c['work']} D={c['done']}")
-        self.log(f"-> #stat T={c['total']} W={c['work']} D={c['done']}")
+        line = (f"#stat T={c['total']} W={c['work']} D={c['done']} "
+                f"C={c_act} X={x_act} P={p_act}")
+        self._write_line(line)
+        self.log(f"-> {line}")
 
     # --- 工作终端名行: 仅在变化时发 #work n1|n2|.. (running 的 session 名) ---
     def push_work(self):
         running = [tid for tid, st in self.mgr.snapshot().items()
                    if st == "running"]
-        names = [self.names.get(tid, "") for tid in running]
+        names = [_clean_tok(self.names.get(tid, "")) for tid in running]
         names = [n for n in names if n]        # 去掉空名
         key = tuple(sorted(names))
         if key == self.last_work:
@@ -234,7 +264,7 @@ class Daemon:
     def push_wait(self):
         waiting = [tid for tid, st in self.mgr.snapshot().items()
                    if st == "waiting"]
-        names = [self.names.get(tid, "") for tid in waiting]
+        names = [_clean_tok(self.names.get(tid, "")) for tid in waiting]
         names = [n for n in names if n]        # 去掉空名
         key = tuple(sorted(names))
         if key == self.last_wait:
@@ -243,7 +273,7 @@ class Daemon:
         self._write_line("#wait " + "|".join(names))
         self.log(f"-> #wait {'|'.join(names) or '(none)'}")
 
-    # --- per-session 详情: #sess name:state:dur|name:state:dur|... ---
+    # --- per-session 详情: #sess name:state:dur:color:agent:tool|... ---
     def push_sess(self):
         snap = self.mgr.snapshot()
         if not snap:
@@ -253,15 +283,18 @@ class Daemon:
             parts = []
             state_map = {"running": "R", "waiting": "W", "done": "D",
                          "pending": "P", "error": "E"}
-            for tid, st in snap.items():
-                name = self.names.get(tid, tid[:8])
+            # 排序优先级: waiting > running > error > done > pending
+            prio = {"waiting": 0, "running": 1, "error": 2, "done": 3, "pending": 4}
+            ordered = sorted(snap.items(), key=lambda kv: (prio.get(kv[1], 9), kv[0]))
+            for tid, st in ordered:
+                name = _clean_tok(self.names.get(tid, tid[:8]), 12) or tid[:8]
                 code = state_map.get(st, "?")
                 ts = self.state_timestamps.get(tid, now)
                 dur = max(0, int(now - ts))
-                tok = f"{name}:{code}:{dur}"
-                col = self.colors.get(tid)
-                if col:
-                    tok += f":{col}"          # peacock 颜色 (6 位 hex)
+                col = self.colors.get(tid, "")
+                ag = self.agents.get(tid, "C")
+                tool = _clean_tok(self.tools.get(tid, ""), 8) if st == "running" else ""
+                tok = f"{name}:{code}:{dur}:{col}:{ag}:{tool}"
                 parts.append(tok)
             line = "#sess " + "|".join(parts)
         if line == self.last_sess:
@@ -270,22 +303,24 @@ class Daemon:
         self._write_line(line)
         self.log(f"-> {line}")
 
-    # --- 完成历史: #hist name:info|name:info|... ---
+    # --- 完成历史: #hist [agent]name:info|... ---
     def push_hist(self):
         if not self.history:
             line = "#hist"
         else:
             now = time.time()
             parts = []
-            for entry in self.history[-MAX_HISTORY:]:
+            for entry in reversed(self.history[-MAX_HISTORY:]):
                 ago = max(0, int(now - entry["completed_at"]))
                 if ago < 60:
-                    ago_s = f"{ago}s ago"
+                    ago_s = f"{ago}s"
                 elif ago < 3600:
-                    ago_s = f"{ago // 60}m ago"
+                    ago_s = f"{ago // 60}m"
                 else:
-                    ago_s = f"{ago // 3600}h ago"
-                parts.append(f"{entry['name']}:{ago_s}")
+                    ago_s = f"{ago // 3600}h"
+                ag = entry.get("agent", "C")
+                nm = _clean_tok(entry.get("name", ""), 10)
+                parts.append(f"{ag}~{nm}:{ago_s}")
             line = "#hist " + "|".join(parts)
         if line == self.last_hist:
             return
@@ -299,81 +334,171 @@ class Daemon:
         self._write_line(f"#time {hhmm}")
         self.log(f"-> #time {hhmm}")
 
-    # --- 今日统计: #today D=count ---
+    # --- 今日统计: #today D=count S=streak ---
     def push_today(self):
         today = time.strftime("%Y-%m-%d")
         if today != self.daily_date:
             self.daily_date = today
             self.daily_done = 0
             self.festival_sent_today = False
-        key = self.daily_done
+        key = (self.daily_done, self.streak_days)
         if key == self.last_today:
             return
         self.last_today = key
-        self._write_line(f"#today D={self.daily_done}")
-        self.log(f"-> #today D={self.daily_done}")
+        self._write_line(f"#today D={self.daily_done} S={self.streak_days}")
+        self.log(f"-> #today D={self.daily_done} S={self.streak_days}")
 
-    # --- Token 用量扫描: 累加今日所有 session 的 assistant usage ---
+    # --- Token 用量扫描: 联合扫描 Claude / Codex / Pi 今日所有 session ---
     def _scan_token_usage(self):
-        projects_dir = os.path.expanduser("~/.claude/projects")
-        if not os.path.isdir(projects_dir):
-            return (0, 0, 0)
-
-        today_start = time.mktime(time.strptime(
-            time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+        today_str = time.strftime("%Y-%m-%d")
+        today_start = time.mktime(time.strptime(today_str, "%Y-%m-%d"))
 
         total_in = 0
         total_out = 0
         total_cache = 0
+        claude_tok = 0
+        codex_tok = 0
+        pi_tok = 0
 
-        for root, _dirs, files in os.walk(projects_dir):
-            for fname in files:
-                if not fname.endswith(".jsonl"):
-                    continue
-                fpath = os.path.join(root, fname)
-                try:
-                    if os.path.getmtime(fpath) < today_start:
+        # 1. Claude Code (~/.claude/projects/**/*.jsonl)
+        projects_dir = os.path.expanduser("~/.claude/projects")
+        if os.path.isdir(projects_dir):
+            for root, _dirs, files in os.walk(projects_dir):
+                for fname in files:
+                    if not fname.endswith(".jsonl"):
                         continue
-                except OSError:
-                    continue
-                try:
-                    with open(fpath, "r", encoding="utf-8",
-                              errors="replace") as f:
-                        for line in f:
-                            if '"assistant"' not in line:
-                                continue
-                            try:
-                                obj = json.loads(line)
-                            except (json.JSONDecodeError, ValueError):
-                                continue
-                            if obj.get("type") != "assistant":
-                                continue
-                            usage = obj.get("message", {}).get("usage")
-                            if not usage:
-                                continue
-                            total_in += usage.get("input_tokens", 0)
-                            total_out += usage.get("output_tokens", 0)
-                            total_cache += usage.get(
-                                "cache_creation_input_tokens", 0)
-                            total_cache += usage.get(
-                                "cache_read_input_tokens", 0)
-                except (OSError, IOError):
-                    continue
+                    fpath = os.path.join(root, fname)
+                    try:
+                        if os.path.getmtime(fpath) < today_start:
+                            continue
+                    except OSError:
+                        continue
+                    try:
+                        with open(fpath, "r", encoding="utf-8",
+                                  errors="replace") as f:
+                            for line in f:
+                                if '"assistant"' not in line:
+                                    continue
+                                try:
+                                    obj = json.loads(line)
+                                except (json.JSONDecodeError, ValueError):
+                                    continue
+                                if obj.get("type") != "assistant":
+                                    continue
+                                usage = obj.get("message", {}).get("usage")
+                                if not usage:
+                                    continue
+                                i = usage.get("input_tokens", 0)
+                                o = usage.get("output_tokens", 0)
+                                ca = (usage.get("cache_creation_input_tokens", 0)
+                                      + usage.get("cache_read_input_tokens", 0))
+                                total_in += i
+                                total_out += o
+                                total_cache += ca
+                                claude_tok += i + o
+                    except (OSError, IOError):
+                        continue
 
-        return (total_in, total_out, total_cache)
+        # 2. Codex (~/.codex/sessions/**/*.jsonl)
+        codex_dir = os.path.expanduser("~/.codex/sessions")
+        if os.path.isdir(codex_dir):
+            for root, _dirs, files in os.walk(codex_dir):
+                for fname in files:
+                    if not fname.endswith(".jsonl"):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    try:
+                        if os.path.getmtime(fpath) < today_start:
+                            continue
+                    except OSError:
+                        continue
+                    try:
+                        last_tot = None
+                        with open(fpath, "r", encoding="utf-8",
+                                  errors="replace") as f:
+                            for line in f:
+                                if '"token_count"' not in line:
+                                    continue
+                                try:
+                                    obj = json.loads(line)
+                                except (json.JSONDecodeError, ValueError):
+                                    continue
+                                if (obj.get("type") == "event_msg"
+                                        and obj.get("payload", {}).get("type") == "token_count"):
+                                    info = obj.get("payload", {}).get("info") or {}
+                                    tot = info.get("total_token_usage")
+                                    if tot:
+                                        last_tot = tot
+                        if last_tot:
+                            raw_i = last_tot.get("input_tokens", 0)
+                            cached_i = last_tot.get("cached_input_tokens", 0)
+                            ca = cached_i + last_tot.get("cache_write_input_tokens", 0)
+                            i = max(0, raw_i - cached_i)
+                            o = last_tot.get("output_tokens", 0)
+                            total_in += i
+                            total_out += o
+                            total_cache += ca
+                            codex_tok += i + o
+                    except (OSError, IOError):
+                        continue
+
+        # 3. Pi (~/.pi/agent/sessions/**/*.jsonl)
+        pi_dir = os.path.expanduser("~/.pi/agent/sessions")
+        if os.path.isdir(pi_dir):
+            for root, _dirs, files in os.walk(pi_dir):
+                for fname in files:
+                    if not fname.endswith(".jsonl"):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    try:
+                        if os.path.getmtime(fpath) < today_start:
+                            continue
+                    except OSError:
+                        continue
+                    try:
+                        with open(fpath, "r", encoding="utf-8",
+                                  errors="replace") as f:
+                            for line in f:
+                                if '"usage"' not in line:
+                                    continue
+                                try:
+                                    obj = json.loads(line)
+                                except (json.JSONDecodeError, ValueError):
+                                    continue
+                                if obj.get("type") != "message":
+                                    continue
+                                msg = obj.get("message") or {}
+                                if msg.get("role") != "assistant":
+                                    continue
+                                usage = msg.get("usage")
+                                if not usage:
+                                    continue
+                                i = usage.get("input", 0)
+                                o = usage.get("output", 0)
+                                ca = usage.get("cacheRead", 0) + usage.get("cacheWrite", 0)
+                                total_in += i
+                                total_out += o
+                                total_cache += ca
+                                pi_tok += i + o
+                    except (OSError, IOError):
+                        continue
+
+        return (total_in, total_out, total_cache, claude_tok, codex_tok, pi_tok)
 
     def push_tok(self):
         try:
-            in_tok, out_tok, cache_tok = self._scan_token_usage()
+            in_tok, out_tok, cache_tok, c_tok, x_tok, p_tok = self._scan_token_usage()
         except Exception as e:
             self.log(f"tok scan error: {e}")
             return
-        key = (in_tok, out_tok, cache_tok)
+        key = (in_tok, out_tok, cache_tok, c_tok, x_tok, p_tok)
         if key == self.last_tok:
             return
         self.last_tok = key
-        self._write_line(f"#tok IN={in_tok} OUT={out_tok} CACHE={cache_tok}")
-        self.log(f"-> #tok IN={in_tok} OUT={out_tok} CACHE={cache_tok}")
+        line = (f"#tok IN={in_tok} OUT={out_tok} CACHE={cache_tok} "
+                f"C={c_tok} X={x_tok} P={p_tok}")
+        self._write_line(line)
+        self.log(f"-> {line}")
 
     # --- 成就系统 ---
     def _achievements_path(self):
@@ -463,33 +588,60 @@ class Daemon:
         with self.lock:
             snap = self.mgr.snapshot()
             for sid, st in list(snap.items()):
-                if st not in ("running", "waiting"):
-                    continue
                 ts = self.state_timestamps.get(sid, now)
-                if (now - ts) >= STALE_SESSION_SEC:
+                if st in ("running", "waiting") and (now - ts) >= STALE_SESSION_SEC:
                     self.log(f"stale session {sid[:8]} ({st} for "
                              f"{int(now - ts)}s), marking idle")
                     self.mgr.idle_task(sid)
                     self.state_timestamps.pop(sid, None)
+                    self.tools.pop(sid, None)
+                elif st == "done" and (now - ts) >= IDLE_AFTER_SEC:
+                    # Codex / Pi 没有 NotificationIdle, 完成超过 15s 自动归档移除
+                    self.mgr.remove_task(sid)
+                    self.state_timestamps.pop(sid, None)
+                    self.tools.pop(sid, None)
+
+    def _record_history(self, sid):
+        hist_name = self.names.get(sid, sid[:8])
+        ag = self.agents.get(sid, "C")
+        self.history = [h for h in self.history if h.get("sid") != sid]
+        self.history.append({
+            "name": hist_name,
+            "sid": sid,
+            "agent": ag,
+            "completed_at": time.time(),
+        })
+        if len(self.history) > MAX_HISTORY:
+            self.history = self.history[-MAX_HISTORY:]
 
     # --- TaskStateManager 状态变化回调: 写串口 + 安排回落定时器 ---
     def _on_state(self, state):
         self._write_line(state)
         self.log(f"-> {state}")
         if state == DONE:
-            # done 脉冲: 停留片刻后回到聚合稳态
-            self.schedule(DONE_PULSE_SEC, self.mgr.settle)
+            # done 脉冲: 停留片刻后回到聚合稳态并清理已完成的单任务
+            self.schedule(DONE_PULSE_SEC, self._settle_and_clean_done)
         elif state == ALL_DONE:
             # 全部完成: 空闲 N 秒后清理已完成任务并回落 idle
             self.schedule(IDLE_AFTER_SEC, self._idle_down)
         else:
             self.cancel_timer()
 
+    def _settle_and_clean_done(self):
+        for tid, st in list(self.mgr.snapshot().items()):
+            if st == "done":
+                self.mgr.remove_task(tid)
+                self.state_timestamps.pop(tid, None)
+                self.tools.pop(tid, None)
+        self.mgr.settle()
+
     def _idle_down(self):
         # all_done 停留后: 移除所有已完成任务, 无任务 -> settle 得到 idle
         for tid, st in list(self.mgr.snapshot().items()):
             if st == "done":
                 self.mgr.remove_task(tid)
+                self.state_timestamps.pop(tid, None)
+                self.tools.pop(tid, None)
 
     def cancel_timer(self):
         if self.timer:
@@ -513,8 +665,10 @@ class Daemon:
             self.push_today()
 
     # --- hook 事件 -> TaskStateManager API ---
-    def on_event(self, event, sid, name="", color=""):
+    def on_event(self, event, sid, name="", color="", agent="", tool=""):
         with self.lock:
+            if not sid and event != "manual":
+                sid = f"{agent or 'claude'}-{name or 'default'}"
             if event == "rename":
                 # 手动 rename: 最高优先, 标记不被 hook 覆盖
                 if name:
@@ -524,10 +678,18 @@ class Daemon:
                 self.names[sid] = name
             if color:
                 self.colors[sid] = color       # peacock 颜色 (空值不覆盖, 保留缓存)
+            if agent:
+                self.agents[sid] = AGENT_CODE_MAP.get(agent.lower(), "C")
+            elif sid not in self.agents:
+                self.agents[sid] = "C"
 
             if event == "UserPromptSubmit":
+                self.combo_count = 1
+                self.last_combo_ts = time.time()
+                self.tools[sid] = tool or "think"
                 self.mgr.start_task(sid)                 # -> working
                 self.state_timestamps[sid] = time.time()
+                self._write_line(f"#combo {self.combo_count}")
 
             elif event == "SessionStart":
                 self.mgr.add_task(sid)                   # pending (视为 idle)
@@ -538,6 +700,8 @@ class Daemon:
                 self.state_timestamps.pop(sid, None)
                 self.names.pop(sid, None)
                 self.colors.pop(sid, None)
+                self.agents.pop(sid, None)
+                self.tools.pop(sid, None)
                 self.renamed.discard(sid)
 
             elif event == "SubagentStop":
@@ -546,6 +710,8 @@ class Daemon:
                 self.schedule(DONE_PULSE_SEC, self.mgr.settle)
 
             elif event == "Stop":
+                self.combo_count = 0
+                self._write_line("#combo 0")
                 # 成就: 检查单次工作时长是否 >= 2h
                 start_ts = self.state_timestamps.get(sid)
                 if start_ts:
@@ -567,6 +733,8 @@ class Daemon:
                     self._save_achievements()
                     self._check_achievements("streak")
                 self._check_achievements("done")
+                self.tools.pop(sid, None)
+                self._record_history(sid)
                 self.mgr.finish_task(sid)                # done(仍有在跑) / all_done
                 self.state_timestamps[sid] = time.time()
 
@@ -578,33 +746,55 @@ class Daemon:
                     self._check_achievements("marathon")
                 # session 真正回到空闲: 记录一次完成历史 (按 sid 去重)
                 if self.mgr.snapshot().get(sid) in ("running", "waiting", "done"):
-                    hist_name = self.names.get(sid, sid[:8])
-                    # 去重: 同一 session 只保留最新一条
-                    self.history = [h for h in self.history
-                                    if h.get("sid") != sid]
-                    self.history.append({"name": hist_name, "sid": sid,
-                                         "completed_at": time.time()})
-                    if len(self.history) > MAX_HISTORY:
-                        self.history = self.history[-MAX_HISTORY:]
+                    self._record_history(sid)
+                self.tools.pop(sid, None)
                 self.mgr.idle_task(sid)
                 self.state_timestamps.pop(sid, None)
 
             elif event == "NotificationChoosing":
                 self.cancel_timer()
+                self.tools[sid] = "wait"
                 self.mgr.wait_task(sid)
                 self.state_timestamps[sid] = time.time()
 
-            elif event == "PostToolUse":
+            elif event in ("PreToolUse", "PostToolUse"):
                 old_st = self.mgr.snapshot().get(sid)
-                self.mgr.unwait_task(sid)
+                if old_st is None or old_st in ("pending", "done"):
+                    self.mgr.start_task(sid)
+                    old_st = "running"
+                else:
+                    self.mgr.unwait_task(sid)
+                if tool:
+                    self.tools[sid] = tool
+                elif event == "PostToolUse" and not self.tools.get(sid):
+                    self.tools[sid] = "code"
+                if event == "PreToolUse":
+                    now_t = time.time()
+                    if now_t - self.last_combo_ts <= 45.0:
+                        self.combo_count += 1
+                    else:
+                        self.combo_count = 1
+                    self.last_combo_ts = now_t
+                    self._write_line(f"#combo {self.combo_count}")
+                    self.log(f"-> #combo {self.combo_count} ({tool})")
                 # 工具仍在执行 -> 该 session 仍活跃, 刷新时间戳避免被 90s reaper 误判空闲。
-                # (旧版只在 waiting->running 转换时刷新, 长 running 任务会被误踢)
                 if old_st in ("running", "waiting"):
                     self.state_timestamps[sid] = time.time()
 
             elif event == "manual":
                 self.cancel_timer()
                 self.mgr._send(sid, force=True)
+
+            elif event == "quit":
+                self.log("received quit command; closing serial and exiting.")
+                with self.ser_lock:
+                    if self.ser is not None:
+                        try:
+                            self.ser.close()
+                        except Exception:
+                            pass
+                        self.ser = None
+                os._exit(0)
 
             else:
                 self.log(f"ignored event: {event}")
@@ -656,7 +846,9 @@ class Daemon:
             sid = msg.get("session_id", "")
             name = msg.get("name", "")
             color = msg.get("color", "")
-            self.on_event(event, sid, name, color)
+            agent = msg.get("agent", "")
+            tool = msg.get("tool", "")
+            self.on_event(event, sid, name, color, agent, tool)
             conn.sendall(b"ok")
         except Exception as e:
             self.log(f"conn error: {e}")
@@ -664,7 +856,16 @@ class Daemon:
             conn.close()
 
 
+FLASH_LOCK = os.path.expanduser("~/.clawdpet_flashing.lock")
+
+
 def main():
+    if os.path.exists(FLASH_LOCK):
+        try:
+            if time.time() - os.path.getmtime(FLASH_LOCK) < 120:
+                sys.exit(0)
+        except Exception:
+            pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", help="serial port, e.g. COM4 (default: auto 303A:)")
     args = ap.parse_args()

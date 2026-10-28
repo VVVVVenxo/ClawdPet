@@ -46,14 +46,19 @@ kill_daemons() {
 KILLER=$!
 trap 'kill "$KILLER" 2>/dev/null; wait "$KILLER" 2>/dev/null' EXIT INT TERM
 
+LOCK_FILE="$HOME/.clawdpet_flashing.lock"
+touch "$LOCK_FILE"
+trap 'rm -f "$LOCK_FILE"; kill "$KILLER" 2>/dev/null; wait "$KILLER" 2>/dev/null' EXIT INT TERM
+
 # 先杀一波确保串口释放
 kill_daemons
 sleep 2
 
-echo "[flash] 后台清场已启动 (仅杀 clawdpet_daemon), 开始构建并烧录..."
+echo "[flash] 后台清场已启动 (含烧录锁 $LOCK_FILE), 开始构建并烧录..."
 "$PIO" run -e "$ENV_NAME" -t upload --upload-port "$PORT"
 RC=${PIPESTATUS[0]:-$?}
 
+rm -f "$LOCK_FILE"
 kill "$KILLER" 2>/dev/null
 trap - EXIT INT TERM
 

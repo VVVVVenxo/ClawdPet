@@ -1,32 +1,31 @@
 # ClawdPet 项目知识地图
 
-> 一个把 Claude Code CLI 的实时状态同步到 M5Stack StickS3 屏幕上的「电子宠物」。
+> 一个把 **Claude Code / Codex / Pi Coding Agent** 的实时状态同步到 M5Stack StickS3 屏幕上的「多端赛博电子宠物」。
 > 这份文档不讲业务，而是把整个项目用到的知识点拆开，方便从零建立完整认知。
 
-项目跨了三个领域：**嵌入式固件（C++/Arduino）**、**电脑端桥接服务（Python）**、**Claude Code 集成（hooks）**。下面按「这块在干什么 → 用到哪些知识点 → 在哪学」的结构展开。
+项目跨了三个领域：**嵌入式固件（C++/Arduino + 粒子/物理渲染）**、**电脑端桥接服务（Python 多端聚合）**、**AI 编程工具集成（Claude/Codex Hooks + Pi TypeScript Extension）**。下面按「这块在干什么 → 用到哪些知识点 → 在哪学」的结构展开。
 
 ---
 
 ## 0. 全局架构：先看懂数据怎么流动
 
 ```
-                    [你在 VSCode 里用 Claude Code]
-                              │  触发 hook 事件 (UserPromptSubmit / Stop / ...)
-                              ▼
-   clawdpet_hook.py  ── stdin JSON(session_id) ──►  TCP:8787 (localhost)
-   (Claude 每次事件启动一个轻量进程)                    │
-                              │ 守护没起就自动拉起        ▼
-                    clawdpet_daemon.py  (常驻，独占串口)
-                              │  复用 TaskStateManager 聚合多窗口状态
-                              │  累计今日完成数、token 统计、检测成就、检测节日
-                              ▼
-                    串口 COM (115200, USB-CDC)
-                              │  发送文本协议: working / #work a|b / #today D=5 / #tok IN=...
-                              ▼
-                    StickS3 固件 (main.cpp)
-                              │  解析协议 → 切 GIF 动画 + 重绘 UI 叠加层
-                              ▼
-                    135x240 屏幕显示宠物 + 状态 (三页面切换)
+    [Claude Code] ── hooks ──► clawdpet_hook.py ──┐
+    [Codex CLI]   ── hooks ──► clawdpet_hook.py ──┼──► TCP:8787 (localhost)
+    [Pi Agent]    ── TS ext ─► clawdpet.ts      ──┘          │
+                                                             ▼
+                                    clawdpet_daemon.py  (常驻，独占串口)
+                                      │  复用 TaskStateManager 聚合三端多窗口状态
+                                      │  追踪平台(C/X/P)、实时工具(bash/edit/read)、连击数(Combo)
+                                      │  联合扫描 ~/.claude + ~/.codex + ~/.pi 今日 Token 用量
+                                      ▼
+                                    串口 COM (115200, USB-CDC)
+                                      │  发送文本协议: working / #stat / #sess / #combo / #tok ...
+                                      ▼
+                                    StickS3 固件 (main.cpp)
+                                      │  解析协议 → 21段GIF状态机 + 舞台粒子引擎 + IMU重力滑移/番茄钟
+                                      ▼
+                                    135x240 屏幕显示赛博潮玩 HUD (三页面切换)
 ```
 
 **核心设计思想**（贯穿全项目，值得记住）：
@@ -97,34 +96,42 @@
 >
 > 教训：添加新 GIF 素材时必须确保 disposal_method=2 + transparency 指向绿色；修改字节序参数后必须同步修改色键常量。
 
-### 1.4 三页面 UI 系统
+### 1.4 三页面「赛博潮玩 HUD」UI 系统
 
 BtnB 循环切换：`MAIN → DETAIL → TOKEN → MAIN`
 
-**MAIN 页面**（有 GIF 动画）：
+**MAIN 页面**（天地平衡布局 + 21 段 GIF + 粒子与物理引擎）：
 ```
-┌─────────────────┐
-│ 14:30       87% │  状态栏: 时间(左) + 电池图标+百分比(右)
-│ W:2  D:5        │  小字: 工作中数量(琥珀) + 今日完成数(绿)
-│ ClawdPet         │  大字 (textSize 2): work+wait 合并列表
-│ my-task    ●    │  wait 名闪烁青色(500ms 周期)
-│ another         │  超过 3 行时每 2s 轮播
-│   🐾 宠物 GIF   │  全屏 GIF 动画 (背景, 绿幕→黑底)
-│ ┌─────────────┐ │
-│ │ thinking.   │ │  状态气泡 (描边, 不填底色)
-│ └─────────────┘ │
-└─────────────────┘
+┌─────────────────────┐ y=0
+│ 14:32  L5 ♥85  ⚡87% │  顶栏: 时间/番茄钟 | 等级+像素爱心+心情 | 电池 + 1px EXP条
+├─────────────────────┤ y=18
+│ ╭─────────────────╮ │
+│ │🟣P ClawdPet >edit│ │  顶部焦点会话卡: 平台徽章(C/X/P)+Peacock色条+项目名+实时工具
+│ ╰─────────────────╯ │
+│   ✦        *    🌙  │  中部留白与昼夜天际线: 夜间闪烁星辰+弯月, 动态飘升 0/1 与火花粒子
+│            [5x COMBO]│  工具连击角标
+│     ╭─────────╮     │
+│     │writing..│     │  自适应窄宽气泡 (紧贴宠物头顶 y=106, 绝不遮挡宠物脸部)
+│     ╰────v────╯     │
+│        🐾           │  宠物舞台 (PET_Y_OFFSET=-18, 双脚踩在下方底座上, 随重力倾斜滑移)
+├─────────────────────┤ y=202
+│ ╭─────────────────╮ │
+│ │ [C:1] [X:0] [P:1]│ │  底部 HUD 底座上行: Claude(橙)/Codex(青)/Pi(紫) 实时活跃胶囊
+│ │ OK:5  ─⋀⋁─   ●○○│ │  底部 HUD 底座下行: 今日完成 | 实时算力心电图(Sparkline) | 页码点
+│ ╰─────────────────╯ │
+└─────────────────────┘ y=240
 ```
 
-**DETAIL 页面**（纯静态，每秒刷新时长）：
-- session 列表（彩色圆点 + 名称 + 状态标签 + 时长自增）
-- 分页翻页（BtnA）
-- 底部：今日完成数 + 心情条
+**DETAIL 页面**（多端任务舱 + 最近完成记录 + RPG 面板）：
+- 活跃 session 圆角卡片（Peacock/平台色条 + `[C/X/P]` 徽章 + 名称 + 实时工具/状态 + 时长自增）
+- 空余空间自动展示 `RECENT DONE` 最近完成历史（`#hist`）
+- 底部面板：左侧显示 RPG 等级与称号（`Lv.5 Coder`）、今日完成与连胜；右侧显示 `EXP` 与 `MOOD` 双进度条
 
-**TOKEN 页面**（纯静态，dirty 时刷新）：
-- 总量大字（IN+OUT，金黄色，textSize 3）
-- IN / OUT / CACHE 明细行（各带颜色标识）
-- 数值自动 K/M 缩写
+**TOKEN 页面**（算力能量站）：
+- 顶部根据今日 Token 总量自动授予段位（`WARMUP` / `CRUISING` / `ON FIRE` / `OVERDRIVE`）
+- Hero 总量卡片：大字显示 `IN + OUT` 总量（支持 `int64_t` 防海量 Cache 溢出）+ `Cache Hit %` 缓存命中率
+- `AGENT SHARE` 三端算力占比卡片：三色比例进度条直观对比今日 Claude / Codex / Pi 各自的算力消耗
+- 底部 `INPUT` / `OUTPUT` / `CACHE` 迷你进度条明细
 
 页面切换时：
 - 离开 MAIN → `closeGif()` 关闭 GIF 解码器（不释放 buffer）
@@ -269,29 +276,24 @@ BtnA 短按触发：
 - **方案**：daemon 的 `time_loop` 每分钟扫描，session 处于 running/waiting 超过 90 秒无新事件 → 自动标记 idle
 - 与 `idle_prompt` 通知（60 秒）互为兜底，谁先触发谁生效
 
-### 4.8 IMU 物理互动
-设备内置 IMU（加速度计），启用两种物理交互：
+### 4.8 IMU 物理互动与舞台粒子系统（全静音办公室友好版）
+设备内置 6 轴 IMU（加速度计），启用四重无声交互：
 
-**摇一摇**：
-- `M5.Imu.getAccel()` 每帧读取加速度，计算合加速度向量模 `sqrt(x²+y²+z²)`
-- 超过 2G 连续 3 帧 → 判定为摇晃
-- 触发：随机 GIF + 红色气泡 "dizzy!" / "woah!" / "hey!!" / "stooop!"
-- 心情 -5（别摇人家！），3 秒后恢复
-- 与 poke/feed 互斥
-
-**长按喂食**：
-- `M5.BtnA.wasHold()` 长按超 500ms 触发（`setHoldThresh` 可调）
-- 触发：eating.gif + 粉色气泡 "yummy!" / "nom nom!" / "thanks!" / "more!"
-- 心情 +20，4 秒后恢复
-- 短按仍是戳一戳（`wasClicked` 和 `wasHold` 是独立事件）
-
-📚 学：M5Unified IMU API（`Imu.update()` + `getAccel()`）、按钮状态机（click vs hold）。
+1. **重力感应倾斜滑移（Tilt Physics）**：
+   - 每帧读取 `ax` 并做一阶低通滤波（`g_tiltSmooth = g_tiltSmooth * 0.82 + target * 0.18`），映射为 `-15..+15px` 的水平偏移 `g_tiltOffsetPx`。
+   - 左右倾斜机身时，GIF 裁切窗口 `CROP_X0`、头顶气泡、天际线星辰和漂浮粒子都会顺着重力方向滑移，大倾角时气泡自动变为 `<< sliding` / `sliding >>`。
+2. **翻转桌面开启 25 分钟专注番茄钟（Flip to Pomodoro）**：
+   - 检测到 `az < -0.72G`（屏幕朝下扣在桌面）持续 0.7s 以上再翻回正面（`az > 0.35G`），自动切换 25 分钟专注番茄钟（顶栏显示 `P25:00` 倒计时，完成奖励 `+15 心情` 与 `+50 EXP`）。
+3. **摇一摇（Shake）**：
+   - 合加速度向量模 `sqrt(x²+y²+z²)` 超过 2G 连续 3 帧触发眩晕反应（心情 -5）。
+4. **长按喂食 & 短按戳一戳**：
+   - `BtnA` 长按播放 `eating.gif`（心情 +20，EXP +15，迸发红心粒子）；短按从 10 段趣味动画池随机切换（心情 +5，EXP +3）。
 
 ---
 
 ## 5. 工具链与工作流知识
 
-- **Bash 脚本**（`flash.sh`）：`trap` 清理、后台进程 `&`、子 shell。
+- **Bash 脚本与烧录锁**（`flash.sh`）：烧录期间创建 `~/.clawdpet_flashing.lock` 并清理后台 `clawdpet_daemon`，防止 hook 自动拉起守护进程抢占 COM 口。
 - **烧录流程**：原生 USB-CDC 自动复位常超时，需手动进下载模式（按住 BOOT + 点 RESET）。esptool 在 `303A:1001` 模式可直接烧。
 - **Git 资源管理**：`.bin`/`.gif` 等大资源、`.pio` 构建产物用 `.gitignore` 排除。
 - **跨平台路径**：Windows 下用 bash，注意 `/dev/null`、正斜杠。
@@ -302,10 +304,10 @@ BtnA 短按触发：
 ## 6. 推荐学习路径（从这个项目出发往外扩）
 
 1. **嵌入式入门**：ESP32 + Arduino 框架 → PlatformIO → GPIO/串口 → 显示驱动（M5GFX/LovyanGFX）。
-2. **图形渲染**：双缓冲、RGB565、色键、帧动画、行缓冲优化——可迁移到任何小屏 GUI。
+2. **图形渲染**：双缓冲、RGB565、色键、帧动画、行缓冲优化、局部脏区擦除（避免破坏 GIF 帧间合成）——可迁移到任何小屏 GUI。
 3. **Python 服务端**：socket + threading + 锁 → 串口 IO + 自动重连 → 状态机与单元测试。
 4. **系统集成思维**：单一职责、解耦/回调注入、协议向后兼容、健壮性（重连/去抖/超时）——这些是工程素养，比具体 API 更值钱。
-5. **Claude Code 扩展**：hooks 事件模型，把外部工具接入 AI 工作流。
+5. **多端 AI Agent 扩展**：Claude Code / Codex Hooks 事件模型 + Pi Coding Agent TypeScript Extension API。
 
 ---
 
@@ -313,17 +315,18 @@ BtnA 短按触发：
 
 | 文件 | 角色 |
 |---|---|
-| `platformio.ini` | 固件构建/依赖/烧录配置，嵌入 16 个 GIF 资源 |
-| `src/main.cpp` | 固件：GIF 动画池渲染 + 三页面 UI + 串口协议 + 心情系统 + NVS 持久化 + 戳一戳 |
-| `src/anim/*.gif` | 16 个嵌入动画（6 状态池 + 戳一戳池） |
+| `platformio.ini` | 固件构建/依赖/烧录配置，嵌入 21 个 GIF 资源 |
+| `src/main.cpp` | 固件：21段GIF状态机 + 赛博潮玩三页HUD + 粒子/星空引擎 + RPG等级系统 + IMU倾斜物理/翻转番茄钟 |
+| `src/anim/*.gif` | 21 个嵌入动画（按昼夜与心情动态切换） |
 | `src/anim/emotes/` | Clawd 像素蟹 emote 源文件 |
 | `src/anim/custom/` | 自定义动画 |
 | `tools/task_state_manager.py` | 纯逻辑状态聚合大脑（可单测，无硬件依赖） |
-| `tools/clawdpet_daemon.py` | 常驻守护：独占串口 + TCP 服务 + 多线程 + 自动重连 + 成就/节日/token/统计 + 会话超时清理 |
-| `tools/clawdpet_hook.py` | 轻量桥接：Claude 事件 → TCP 上报，自动拉起 daemon |
+| `tools/clawdpet_daemon.py` | 常驻守护：独占串口 + TCP 服务 + 三端状态/工具/Combo聚合 + 三端Token扫描 |
+| `tools/clawdpet_hook.py` | 轻量桥接：自动识别 Claude / Codex / Pi 并提取当前工具名上报 daemon |
+| `tools/clawdpet_pi_extension.ts` | Pi Coding Agent 原生 TypeScript 扩展（直连 daemon TCP:8787） |
 | `tools/clawdpet_send.py` | 手动发状态/改名/调试 CLI |
 | `tools/debug_notification.py` | 调试 notification 事件的辅助工具 |
-| `tools/flash.sh` | 一键烧录（烧录期清场 daemon 释放串口） |
+| `tools/flash.sh` | 一键烧录（带 `.clawdpet_flashing.lock` 防抢口机制） |
 | `tools/download_emotes.py` | 下载 GIF 动画素材 |
 | `tools/achievements.json` | 成就持久化数据 |
 | `pack.bat` | 一键打包发布用 zip（排除构建产物/日志/备份） |

@@ -1,6 +1,7 @@
 .pio
 .vscode/
 .claude/
+.codegraph/
 tools/achievements.json
 tools/daemon.log
 tools/daemon.err

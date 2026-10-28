@@ -75,13 +75,59 @@ def spawn_daemon():
                      close_fds=True)
 
 
+def detect_agent(data):
+    """自动识别事件来自哪个 AI 工具: claude / codex / pi"""
+    explicit = (data.get("agent") or os.environ.get("CLAWDPET_AGENT") or "").strip().lower()
+    if explicit in ("claude", "codex", "pi"):
+        return explicit
+    transcript = str(data.get("transcript_path") or "").replace("\\", "/").lower()
+    if (os.environ.get("CODEX_THREAD_ID")
+            or os.environ.get("CODEX_SANDBOX")
+            or os.environ.get("CODEX_HOME")
+            or "/.codex/" in transcript):
+        return "codex"
+    if (os.environ.get("PI_SESSION_ID")
+            or os.environ.get("PI_AGENT_DIR")
+            or "/.pi/" in transcript):
+        return "pi"
+    return "claude"
+
+
+def extract_tool(data):
+    """从 PreToolUse / PostToolUse 负载中提取简短工具名"""
+    raw = (data.get("tool_name")
+           or data.get("tool")
+           or (data.get("tool_input") or {}).get("tool")
+           or "")
+    if not isinstance(raw, str):
+        return ""
+    raw = raw.strip()
+    # MCP 工具名通常形如 mcp__server__tool, 简化显示
+    if raw.startswith("mcp__"):
+        parts = raw.split("__")
+        return ("mcp:" + parts[-1])[:10] if len(parts) > 1 else "mcp"
+    return raw[:10]
+
+
+FLASH_LOCK = os.path.expanduser("~/.clawdpet_flashing.lock")
+
+
 def main():
+    if os.path.exists(FLASH_LOCK):
+        try:
+            if time.time() - os.path.getmtime(FLASH_LOCK) < 120:
+                sys.exit(0)
+        except Exception:
+            pass
     # 读 stdin JSON (hook 负载); 读不到就给空 dict
     raw = ""
     try:
-        raw = sys.stdin.read()
+        raw = sys.stdin.buffer.read().decode("utf-8", errors="replace")
     except Exception:
-        pass
+        try:
+            raw = sys.stdin.read()
+        except Exception:
+            pass
     data = {}
     if raw.strip():
         try:
@@ -90,7 +136,13 @@ def main():
             data = {}
 
     event = sys.argv[1] if len(sys.argv) > 1 else data.get("hook_event_name", "")
-    cwd = data.get("cwd", "")
+    cwd = data.get("cwd", "") or os.getcwd()
+    agent = detect_agent(data)
+    sid = (data.get("session_id")
+           or data.get("thread_id")
+           or os.environ.get("CODEX_THREAD_ID")
+           or os.environ.get("CLAUDE_CODE_SESSION_ID")
+           or "")
     # 终端显示名: CLAWDPET_NAME 优先, 兼容旧变量名, 否则回落 cwd 目录名
     name = (os.environ.get("CLAWDPET_NAME")
             or os.environ.get("NOAPET_NAME")
@@ -99,12 +151,15 @@ def main():
     if not name and cwd:
         name = os.path.basename(cwd.rstrip("/\\"))
     color = read_peacock_color(cwd)
+    tool = extract_tool(data)
     payload = {
         "event": event,
-        "session_id": data.get("session_id", ""),
+        "session_id": sid,
         "cwd": cwd,
         "name": name,
         "color": color,
+        "agent": agent,
+        "tool": tool,
     }
 
     try:
