@@ -128,13 +128,10 @@ class Daemon:
         # 聚合逻辑: 串口写入作为 emit 注入; done/all_done 由定时器回落
         self.mgr = TaskStateManager(emit=self._on_state)
 
-        ser, actual = self._open_serial()
-        if ser is not None:
-            self.ser = ser
-            self.log(f"serial open: {actual} @ {BAUD}")
-        else:
-            self.log("device not present at startup; polling for it...")
-            self._start_reconnect()
+        # 后台线程打开串口并等待 ESP32 boot ok 后自动全量 _resync,
+        # 让主线程立即 bind 8787 端口接收 hook 事件, 绝不阻塞或丢包。
+        threading.Thread(target=self._serial_read_loop, daemon=True).start()
+        self._start_reconnect()
 
     # --- 探测并打开串口; 成功返回 (ser, port), 失败返回 (None, None) ---
     def _open_serial(self):
@@ -146,9 +143,15 @@ class Daemon:
             tried.append(auto)
         for port in tried:
             try:
-                ser = serial.Serial(port, BAUD, timeout=0.3,
+                ser = serial.Serial(port, BAUD, timeout=0.25,
                                     write_timeout=WRITE_TIMEOUT_SEC)
-                time.sleep(1.2)               # 等 ESP32-S3 M5.begin(~900ms) + CDC 稳定
+                # 等待 ESP32-S3 完成启动打印 "boot ok" (最长等 2.2s)
+                t0 = time.time()
+                while time.time() - t0 < 2.2:
+                    line = ser.readline()
+                    if b"boot ok" in line:
+                        break
+                time.sleep(0.15)
                 ser.reset_input_buffer()
                 return ser, port
             except (serial.SerialException, OSError):
@@ -156,7 +159,29 @@ class Daemon:
         return None, None
 
     def log(self, msg):
-        print(f"[daemon] {time.strftime('%H:%M:%S')} {msg}", flush=True)
+        line = f"[daemon] {time.strftime('%H:%M:%S')} {msg}"
+        print(line, flush=True)
+        try:
+            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "daemon.log")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
+    def _serial_read_loop(self):
+        while True:
+            ser = self.ser
+            if ser is None:
+                time.sleep(0.3)
+                continue
+            try:
+                raw = ser.readline()
+                if raw:
+                    txt = raw.decode("utf-8", errors="replace").strip()
+                    if txt:
+                        self.log(f"ESP32| {txt}")
+            except Exception:
+                time.sleep(0.3)
 
     # --- 串口写一行 (加锁; 任何线程都经此) ---
     # 写失败时关闭句柄并触发后台重连, 不抛给调用方。失败包括:
@@ -568,14 +593,20 @@ class Daemon:
         self.push_time()
         self._check_festival()
         self.push_tok()
+        # 启动后第 2s 和第 5s 额外补发校时, 彻底杜绝设备刚开机漏包
+        for delay in (2.0, 3.0):
+            time.sleep(delay)
+            try:
+                self.push_time()
+            except Exception:
+                pass
         while True:
-            now = time.time()
-            time.sleep(60 - (now % 60) + 0.2)
+            time.sleep(15.0)
             try:
                 self.push_time()
                 self._check_festival()
                 self._reap_stale_sessions()
-                # 每分钟刷新 #sess 避免详情页时长漂移
+                # 刷新 #sess 避免详情页时长漂移
                 with self.lock:
                     self.last_sess = None
                     self.push_sess()
