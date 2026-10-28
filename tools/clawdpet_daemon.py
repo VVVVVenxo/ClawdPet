@@ -148,7 +148,7 @@ class Daemon:
             try:
                 ser = serial.Serial(port, BAUD, timeout=0.3,
                                     write_timeout=WRITE_TIMEOUT_SEC)
-                time.sleep(0.4)               # 等 CDC 稳定
+                time.sleep(1.2)               # 等 ESP32-S3 M5.begin(~900ms) + CDC 稳定
                 ser.reset_input_buffer()
                 return ser, port
             except (serial.SerialException, OSError):
@@ -799,6 +799,7 @@ class Daemon:
             else:
                 self.log(f"ignored event: {event}")
 
+            self.push_time()        # 确保任何事件到达时设备时钟立即校准
             self.push_stat()        # 每个事件处理后, 计数变化才发 #stat
             self.push_work()        # 工作中的终端名变化才发 #work
             self.push_wait()        # 等待中的终端名变化才发 #wait

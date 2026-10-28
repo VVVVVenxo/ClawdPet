@@ -479,6 +479,9 @@ static void saveState() {
   g_prefs.putInt("streak", g_streakDays);
   g_prefs.putInt("level", g_level);
   g_prefs.putInt("exp", g_exp);
+  if (g_timeValid) {
+    g_prefs.putInt("lastMin", currentMinOfDay());
+  }
   g_prefs.putInt("state", (int)g_state);
   g_prefs.putInt("workCount", g_workCount);
   for (int i = 0; i < g_workCount; i++) {
@@ -509,6 +512,12 @@ static void loadState() {
   g_streakDays = max(1, g_prefs.getInt("streak", 1));
   g_level      = max(1, g_prefs.getInt("level", 1 + g_streakDays));
   g_exp        = constrain(g_prefs.getInt("exp", (g_todayDone * 25) % 100), 0, 99);
+  int savedMin = g_prefs.getInt("lastMin", -1);
+  if (savedMin >= 0 && savedMin < 1440) {
+    g_baseMinOfDay = savedMin;
+    g_baseMillis   = millis();
+    g_timeValid    = true;
+  }
   g_state      = (PetState)g_prefs.getInt("state", 0);
   g_workCount  = g_prefs.getInt("workCount", 0);
   for (int i = 0; i < g_workCount && i < MAX_WORK_NAMES; i++) {
@@ -834,7 +843,16 @@ static void drawStatusBarOverlay() {
   g_canvas.setFont(nullptr);
   g_canvas.setTextSize(1);
 
-  // 左: 若开启专注番茄钟则显示倒计时, 否则显示 24h 时间
+  // 左: 永远固定显示 24h 时间 (不再被番茄钟覆盖)
+  char ts[6];
+  int m = currentMinOfDay();
+  if (m < 0) strcpy(ts, "--:--");
+  else       snprintf(ts, sizeof(ts), "%02d:%02d", m / 60, m % 60);
+  g_canvas.setTextColor(TFT_WHITE, colSurfaceAlt());
+  g_canvas.setTextDatum(top_left);
+  g_canvas.drawString(ts, 4, 5);
+
+  // 若开启专注番茄钟, 在后台检查完成并在舞台左上角显示胶囊
   if (g_pomoActive) {
     uint32_t elapsed = millis() - g_pomoStartMs;
     if (elapsed >= POMO_TOTAL_MS) {
@@ -845,23 +863,7 @@ static void drawStatusBarOverlay() {
       g_pokeActive  = true;
       g_pokeStartMs = millis();
       g_pokePhrase  = g_customBubbleBuf;
-    } else {
-      uint32_t remSec = (POMO_TOTAL_MS - elapsed) / 1000UL;
-      char pBuf[10];
-      snprintf(pBuf, sizeof(pBuf), "P%02d:%02d", (int)(remSec / 60), (int)(remSec % 60));
-      g_canvas.setTextColor(colCoral(), colSurfaceAlt());
-      g_canvas.setTextDatum(top_left);
-      g_canvas.drawString(pBuf, 3, 5);
     }
-  }
-  if (!g_pomoActive) {
-    char ts[6];
-    int m = currentMinOfDay();
-    if (m < 0) strcpy(ts, "--:--");
-    else       snprintf(ts, sizeof(ts), "%02d:%02d", m / 60, m % 60);
-    g_canvas.setTextColor(TFT_WHITE, colSurfaceAlt());
-    g_canvas.setTextDatum(top_left);
-    g_canvas.drawString(ts, 4, 5);
   }
 
   // 中: Lv.n + 像素小爱心 + 心情
@@ -1201,8 +1203,20 @@ static void drawBubbleShape(int by, int bh, int r, uint16_t borderCol, const cha
   g_canvas.drawString(text, cx, by + bh / 2);
 }
 
-// 绘制 Nx COMBO 悬浮连击角标
+// 绘制 Nx COMBO 悬浮连击角标 & 番茄钟角标
 static void drawComboBadge() {
+  if (g_pomoActive) {
+    uint32_t elapsed = millis() - g_pomoStartMs;
+    uint32_t remSec = (elapsed < POMO_TOTAL_MS) ? ((POMO_TOTAL_MS - elapsed) / 1000UL) : 0;
+    char pBuf[12];
+    snprintf(pBuf, sizeof(pBuf), "P %02d:%02d", (int)(remSec / 60), (int)(remSec % 60));
+    g_canvas.fillRoundRect(4, 89, 46, 12, 3, colCoral());
+    g_canvas.setFont(nullptr);
+    g_canvas.setTextSize(1);
+    g_canvas.setTextColor(TFT_BLACK, colCoral());
+    g_canvas.setTextDatum(middle_center);
+    g_canvas.drawString(pBuf, 27, 95);
+  }
   if (g_combo < 2 || (millis() - g_lastComboMs) > COMBO_SHOW_MS) return;
   char cBuf[14];
   snprintf(cBuf, sizeof(cBuf), "%dx COMBO!", g_combo);
@@ -1966,12 +1980,9 @@ static void pollBattery() {
 }
 
 void setup() {
+  Serial.begin(115200);
   auto cfg = M5.config();
   M5.begin(cfg);
-
-  Serial.begin(115200);
-  uint32_t t0 = millis();
-  while (!Serial && (millis() - t0) < 1500) { delay(10); }
 
   M5.Display.setRotation(0);          // 竖屏 135x240
   M5.Display.setBrightness(135);
