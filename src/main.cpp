@@ -473,6 +473,8 @@ static void addExp(int amount) {
   markDirty();
 }
 
+static int currentMinOfDay();
+
 static void saveState() {
   g_prefs.putInt("mood", g_mood);
   g_prefs.putInt("todayDone", g_todayDone);
