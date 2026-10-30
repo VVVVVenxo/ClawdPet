@@ -135,8 +135,10 @@ static void stepSparkline() {
 }
 
 // --- 陀螺仪重力倾斜 & 翻转番茄钟 ---
+static bool     g_axBaselineInit = false;
+static float    g_axBaseline     = 0.0f;   // 自适应桌面静置基线, 防止斜放/侧放误触 sliding
 static float    g_tiltSmooth     = 0.0f;
-static int      g_tiltOffsetPx   = 0;      // -15 .. +15 像素水平偏移
+static int      g_tiltOffsetPx   = 0;      // -14 .. +14 像素动态水平偏移
 static int      g_prevTiltPx     = 0;
 static uint32_t g_tiltReactMs    = 0;
 
@@ -1150,7 +1152,7 @@ static void drawSessionCardsOverlay() {
 
 // 根据当前工具/连击/倾斜/时段生成生动的气泡文案
 static const char* resolveDynamicPhrase() {
-  if (abs(g_tiltOffsetPx) >= 10) {
+  if (g_state == PetState::IDLE && abs(g_tiltOffsetPx) >= 11) {
     return (g_tiltOffsetPx > 0) ? "sliding >>" : "<< sliding";
   }
 
@@ -2097,13 +2099,20 @@ void loop() {
       float ax, ay, az;
       M5.Imu.getAccel(&ax, &ay, &az);
 
-      // 1. 重力倾斜平滑滤波 (左右倾斜机身 -> 宠物与气泡跟着滑动)
-      float targetTilt = constrain(-ax, -0.85f, 0.85f);
-      g_tiltSmooth = g_tiltSmooth * 0.82f + targetTilt * 0.18f;
-      if (fabsf(g_tiltSmooth) < 0.12f) {
+      // 1. 自适应基线动态倾斜滤波:
+      //    无论设备在桌面斜靠、平放还是受线材拉扯倾斜, g_axBaseline 会在 ~1s 内自动适应当前静置姿态;
+      //    只有主动拿起左右晃动/倾斜机身产生相对变化量 (ax - g_axBaseline) 时才会触发滑动!
+      if (!g_axBaselineInit) {
+        g_axBaseline     = ax;
+        g_axBaselineInit = true;
+      }
+      g_axBaseline = g_axBaseline * 0.94f + ax * 0.06f;
+      float deltaAx = constrain(-(ax - g_axBaseline), -0.85f, 0.85f);
+      g_tiltSmooth = g_tiltSmooth * 0.78f + deltaAx * 0.22f;
+      if (fabsf(g_tiltSmooth) < 0.18f) {
         g_tiltOffsetPx = 0;
       } else {
-        g_tiltOffsetPx = constrain((int)(g_tiltSmooth * 18.0f), -15, 15);
+        g_tiltOffsetPx = constrain((int)(g_tiltSmooth * 22.0f), -14, 14);
       }
 
       // 2. 翻转桌面检测 (屏幕朝下扣放 0.8s 再翻回来 -> 切换 25 分钟专注番茄钟)
