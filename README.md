@@ -39,10 +39,12 @@ A pixel-art cyber desk pet that lives on an **M5StickS3** and reacts to your **C
 - 🐾 **Multi-Agent Live Sync** — Tracks **Claude Code (`C`)**, **Codex (`X`)**, and **Pi (`P`)** simultaneously with brand-colored capsules
 - 🎬 **21 Pixel Animations** — Day/Night smart pools (`coding`, `gaming`, `singing`, `sleeping`, `listening`, `shower`, `coffee`, `guitar`, `dragon-boat`, etc.)
 - ✨ **Stage Particle Engine & Day/Night Sky** — Matrix `0/1` bits when running commands, golden `+` sparks when editing files, floating `♥` hearts when fed, plus twinkling night stars & a pixel crescent moon after 21:00
-- 🎮 **RPG Level & EXP System (`Lv.1 ~ Lv.99`)** — Earn EXP from tool calls, completed tasks, and focus sessions; unlock titles (`Novice` → `Coder` → `Hacker` → `Architect` → `Wizard` → `CyberGod`)
+- 🎮 **RPG Level & Bug Boss Raid (`Lv.1 ~ Lv.99`)** — Every tool call from Claude/Codex/Pi deals floating damage (`-28`, `CRIT -64!`) to 8 classic Bug Bosses (`NullPtr`, `RaceCond`, `MemLeak`, `Heisenbug`, `Segfault`, `MergeDmn`, `Deadlock`, `LegacyCore`) with a live Boss HP bar on the stage floor and Page 2 RPG panel
+- 🎰 **Cyber Gacha & D20 Geek Oracle** — Double-click `BtnA` to spin the Cyber Gacha (`SSR! 0-BUG`, `777 JACKPOT`, `2x ATK FEVER BUFF`), or shake the device to roll a 20-sided Programmer Decision Dice (`D20=20 NAT CRIT`, `SHIP IT!`, `LGTM`, `ADD TESTS`, `DONT PUSH!`)
+- 🌠 **Shooting Star Wish & Hourly Hydrate Chime** — Catch periodic shooting stars across the sky with `BtnA` (`STAR WISH! +40XP`), plus silent top-of-the-hour hydration reminders (`XX:00 HYDRATE! ~`)
 - 🔥 **Tool Combo & Live ECG Sparkline** — High-speed tool execution triggers `Nx COMBO!` badges and spikes the real-time activity heartbeat waveform in the bottom dock
-- 📐 **Gravity Tilt Physics** — Tilt the device left or right and watch the pet, speech bubble, and particles slide with gravity
-- 🍅 **Flip-to-Pomodoro (25m Focus Timer)** — Place the screen face-down for 1s and flip it back up to toggle a silent 25-minute Pomodoro timer (`P25:00`)
+- 📐 **Adaptive Gravity Tilt Physics** — Auto-calibrates to any resting desk angle in ~1s; actively tilting the device slides the pet, bubble, and particles along gravity
+- 🍅 **Flip-to-Pomodoro (25m Focus Timer)** — Place the screen face-down for 1s and flip it back up to toggle a silent 25-minute Pomodoro badge (`P 25:00`)
 - 📊 **3-Page Cyber HUD** — `Pet Stage` → `Sessions & History` → `Compute Energy (Tokens & Agent Share)`
 - 💾 **Persistent State** — Level, EXP, mood, streak, tasks, and sessions survive reboots via NVS flash storage
 
@@ -117,12 +119,13 @@ Copy `tools/clawdpet_pi_extension.ts` to `~/.pi/agent/extensions/clawdpet.ts`. I
 
 ### Physical Controls & Gestures (100% Silent)
 
-- **BtnB click**: Cycle pages (`Pet Stage` → `Sessions & RPG Card` → `Tokens & Agent Share`)
-- **BtnA short-press**: Poke the pet (`+5 mood`, `+3 EXP`, random animation from 10-emote pool + heart particles)
+- **BtnB click**: Cycle pages (`Pet Stage` → `Sessions & Boss Raid RPG Card` → `Tokens & Agent Share`)
+- **BtnA single-click**: Poke the pet & attack the current Bug Boss (`+6 mood`, `+3 EXP`, `-18 HP`, or catch a shooting star for `+40 EXP`!)
+- **BtnA double-click**: Spin the **Cyber Gacha (`🎰`)** (`SSR! 0-BUG +40XP`, `777 JACKPOT`, `3-min 2x ATK FEVER BUFF`, `1-SHOT PASS`)
 - **BtnA long-press**: Feed the pet (`+20 mood`, `+15 EXP`, eating animation + heart burst)
-- **Tilt left / right**: Pet, bubble, and particles slide along gravity (`<< sliding` / `sliding >>`)
-- **Flip face-down (1s) & back up**: Toggle 25-minute Focus Pomodoro countdown (`P25:00`, `+50 EXP` on completion)
-- **Shake device**: Dizzy reaction (`-5 mood`)
+- **Active tilt left / right**: Pet, bubble, and particles slide along gravity (with adaptive resting baseline so angled desk stands never false-trigger)
+- **Flip face-down (1s) & back up**: Toggle 25-minute Focus Pomodoro countdown (`P 25:00` badge, `+50 EXP` on completion)
+- **Shake device**: Roll the **D20 Programmer Oracle (`🎲`)** (`D20=20 NAT CRIT!!`, `SHIP IT!`, `LGTM ~`, `ADD TESTS`, `DONT PUSH!`)
 
 ---
 

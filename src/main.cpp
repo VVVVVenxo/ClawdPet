@@ -101,9 +101,38 @@ static int64_t  g_tokClaude = 0;
 static int64_t  g_tokCodex  = 0;
 static int64_t  g_tokPi     = 0;
 
-// --- RPG 养成系统 (Level & EXP) ---
+// --- RPG 养成系统 (Level & EXP) & 赛博 Bug Boss 讨伐战 ---
 static int      g_level = 1;
 static int      g_exp   = 0;   // 0..99, 满 100 升一级
+
+static const int BOSS_COUNT = 8;
+static const char* kBossNames[BOSS_COUNT] = {
+  "NullPtr", "RaceCond", "MemLeak", "Heisenbug",
+  "Segfault", "MergeDmn", "Deadlock", "LegacyCore"
+};
+static int      g_bossIdx          = 0;
+static int      g_bossMaxHp        = 300;
+static int      g_bossHp           = 300;
+static int      g_bossKills        = 0;
+static uint32_t g_bossHitMs        = 0;
+static uint32_t g_feverUntilMs     = 0;   // 双倍算力暴击 BUFF 截止时刻
+
+// 舞台伤害飘字 (-25 / CRIT -68!)
+static bool     g_dmgActive        = false;
+static float    g_dmgX             = 67.0f;
+static float    g_dmgY             = 96.0f;
+static uint8_t  g_dmgLife          = 0;
+static bool     g_dmgCrit          = false;
+static char     g_dmgText[18]      = {0};
+
+// 舞台夜空流星许愿 (Shooting Star) & 整点健康提醒 & 双击扭蛋
+static bool     g_shootActive      = false;
+static float    g_shootX           = 0.0f;
+static float    g_shootY           = 0.0f;
+static uint8_t  g_shootLife        = 0;
+static uint32_t g_lastShootMs      = 0;
+static int      g_lastChimeHour    = -1;
+static uint32_t g_lastBtnAClickMs  = 0;
 
 // --- 工具连击 (Combo) & 实时心电图波形 (Sparkline) ---
 static int      g_combo         = 0;
@@ -463,6 +492,7 @@ static void markDirty() {
 
 static void addExp(int amount) {
   if (amount <= 0) return;
+  if (millis() < g_feverUntilMs) amount *= 2;
   g_exp += amount;
   bool leveledUp = false;
   while (g_exp >= 100) {
@@ -482,6 +512,40 @@ static void addExp(int amount) {
   markDirty();
 }
 
+static void hitBoss(int baseDmg, bool forceCrit = false) {
+  if (baseDmg <= 0) return;
+  bool fever = (millis() < g_feverUntilMs);
+  bool crit  = forceCrit || fever || (g_combo >= 5) || ((esp_random() % 100) < 20);
+  int dmg    = baseDmg + (int)(esp_random() % 9);
+  if (crit) dmg = dmg * 2 + 8;
+  g_bossHp   -= dmg;
+  g_bossHitMs = millis();
+
+  // 生成浮动伤害飘字 (位于气泡上方 y=86..64, 不挡宠物面部)
+  g_dmgActive = true;
+  g_dmgCrit   = crit;
+  g_dmgX      = constrain((SCR_W / 2) + g_tiltOffsetPx + ((int)(esp_random() % 27) - 13), 24, SCR_W - 24);
+  g_dmgY      = 84.0f;
+  g_dmgLife   = 16;
+  if (crit) snprintf(g_dmgText, sizeof(g_dmgText), "CRIT -%d!", dmg);
+  else      snprintf(g_dmgText, sizeof(g_dmgText), "-%d", dmg);
+
+  if (g_bossHp <= 0) {
+    g_bossKills++;
+    g_bossIdx   = (g_bossIdx + 1) % BOSS_COUNT;
+    g_bossMaxHp = 300 + g_bossIdx * 120 + min(1200, g_bossKills * 60);
+    g_bossHp    = g_bossMaxHp;
+    addExp(45);
+    burstParticles(PT_STAR, colAmber(), 8);
+    snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "BOSS SLAIN! +45XP");
+    g_pokeActive  = true;
+    g_pokeStartMs = millis();
+    g_pokePhrase  = g_customBubbleBuf;
+  }
+  g_detailDirty = true;
+  markDirty();
+}
+
 static int currentMinOfDay();
 
 static void saveState() {
@@ -490,6 +554,9 @@ static void saveState() {
   g_prefs.putInt("streak", g_streakDays);
   g_prefs.putInt("level", g_level);
   g_prefs.putInt("exp", g_exp);
+  g_prefs.putInt("bossIdx", g_bossIdx);
+  g_prefs.putInt("bossHp", g_bossHp);
+  g_prefs.putInt("bossKills", g_bossKills);
   if (g_timeValid) {
     g_prefs.putInt("lastMin", currentMinOfDay());
   }
@@ -523,6 +590,10 @@ static void loadState() {
   g_streakDays = max(1, g_prefs.getInt("streak", 1));
   g_level      = max(1, g_prefs.getInt("level", 1 + g_streakDays));
   g_exp        = constrain(g_prefs.getInt("exp", (g_todayDone * 25) % 100), 0, 99);
+  g_bossKills  = max(0, g_prefs.getInt("bossKills", 0));
+  g_bossIdx    = constrain(g_prefs.getInt("bossIdx", 0), 0, BOSS_COUNT - 1);
+  g_bossMaxHp  = 300 + g_bossIdx * 120 + min(1200, g_bossKills * 60);
+  g_bossHp     = constrain(g_prefs.getInt("bossHp", g_bossMaxHp), 1, g_bossMaxHp);
   int savedMin = g_prefs.getInt("lastMin", -1);
   if (savedMin >= 0 && savedMin < 1440) {
     g_baseMinOfDay    = savedMin;
@@ -697,9 +768,15 @@ static void clearDynamicRegionsBeforeGif() {
     g_canvas.fillRect(0, 38, SCR_W, 164, BG_COLOR);
     g_prevTiltPx = g_tiltOffsetPx;
   }
-  // 擦除顶部会话卡区域 (y=18..62) 和 气泡+Combo区域 (y=88..133)
+  // 擦除顶部会话卡区域 (y=18..62) 和 飘字+流星+气泡区域 (y=62..133)
   g_canvas.fillRect(0, 18, SCR_W, 44, BG_COLOR);
   g_canvas.fillRect(0, 88, SCR_W, 45, BG_COLOR);
+  if (g_dmgActive) {
+    g_canvas.fillRect(0, max(18, (int)g_dmgY - 7), SCR_W, 14, BG_COLOR);
+  }
+  if (g_shootActive) {
+    g_canvas.fillRect(max(0, (int)g_shootX - 18), max(18, (int)g_shootY - 8), 26, 15, BG_COLOR);
+  }
 
   // 擦除每个粒子的上一帧位置
   for (int i = 0; i < MAX_PARTICLES; i++) {
@@ -824,6 +901,45 @@ static void drawStageAtmosphereAndParticles() {
         g_canvas.drawString((pt.life > 16) ? "z" : "Z", px, py);
         break;
       }
+    }
+  }
+
+  // 4. 舞台流星系统 (每 ~26s 划过夜空/舞台上空, 按 BtnA 可捕捉许愿!)
+  if (!g_shootActive && (now - g_lastShootMs >= 26000UL)) {
+    g_lastShootMs = now;
+    g_shootActive = true;
+    g_shootX      = 14.0f;
+    g_shootY      = 64.0f;
+    g_shootLife   = 28;
+  }
+  if (g_shootActive) {
+    g_shootX += 3.6f;
+    g_shootY += 0.65f;
+    if (g_shootLife > 0) g_shootLife--;
+    int sx = (int)g_shootX;
+    int sy = (int)g_shootY;
+    if (g_shootLife == 0 || sx >= SCR_W - 6 || sy >= 86) {
+      g_shootActive = false;
+    } else {
+      g_canvas.drawLine(sx - 12, sy - 2, sx, sy, colCodex());
+      g_canvas.drawLine(sx - 6,  sy - 1, sx, sy, colAmber());
+      g_canvas.fillCircle(sx, sy, 1, TFT_WHITE);
+    }
+  }
+
+  // 5. Boss 战浮动伤害飘字 (-24 / CRIT -58!)
+  if (g_dmgActive) {
+    g_dmgY -= 1.15f;
+    if (g_dmgLife > 0) g_dmgLife--;
+    if (g_dmgLife == 0 || g_dmgY < 62.0f) {
+      g_dmgActive = false;
+    } else {
+      g_canvas.setFont(&fonts::Font0);
+      g_canvas.setTextSize(1);
+      uint16_t dCol = g_dmgCrit ? colAmber() : colCoral();
+      g_canvas.setTextColor(dCol);
+      g_canvas.setTextDatum(middle_center);
+      g_canvas.drawString(g_dmgText, (int)g_dmgX, (int)g_dmgY);
     }
   }
 }
@@ -967,11 +1083,21 @@ static void drawBottomHudDock() {
   int dockY = 202, dockH = 37;
   g_canvas.fillRoundRect(2, dockY, SCR_W - 4, dockH, 5, colSurface());
   g_canvas.drawRoundRect(2, dockY, SCR_W - 4, dockH, 5, colBorder());
-  // 顶部亮边作为宠物站立的舞台发光地板线
-  uint16_t stageLineCol = (g_combo >= 5) ? colPi()
-                        : (g_state == PetState::WORKING) ? colAmber()
-                        : g_canvas.color565(65, 85, 120);
-  g_canvas.drawFastHLine(6, dockY, SCR_W - 12, stageLineCol);
+  // 顶部亮边: 兼具舞台发光地板线 + 实时 Bug Boss 血条 (2px)
+  int barTrackW = SCR_W - 12;
+  g_canvas.drawFastHLine(6, dockY,     barTrackW, colSurfaceAlt());
+  g_canvas.drawFastHLine(6, dockY + 1, barTrackW, colSurfaceAlt());
+  int bossFillW = (barTrackW * constrain(g_bossHp, 0, g_bossMaxHp)) / max(1, g_bossMaxHp);
+  bool bossHitFlash = (millis() - g_bossHitMs) < 350;
+  bool feverActive  = (millis() < g_feverUntilMs);
+  uint16_t stageLineCol = bossHitFlash ? TFT_WHITE
+                        : feverActive  ? colPi()
+                        : (g_state == PetState::WORKING) ? colCoral()
+                        : colAmber();
+  if (bossFillW > 0) {
+    g_canvas.drawFastHLine(6, dockY,     bossFillW, stageLineCol);
+    g_canvas.drawFastHLine(6, dockY + 1, bossFillW, stageLineCol);
+  }
 
   int cAct = 0, xAct = 0, pAct = 0;
   getAgentActiveCounts(&cAct, &xAct, &pAct);
@@ -1231,6 +1357,16 @@ static void drawComboBadge() {
     g_canvas.setTextColor(TFT_BLACK, colCoral());
     g_canvas.setTextDatum(middle_center);
     g_canvas.drawString(pBuf, 27, 95);
+  } else if (millis() < g_feverUntilMs) {
+    uint32_t remSec = (g_feverUntilMs - millis()) / 1000UL;
+    char fBuf[14];
+    snprintf(fBuf, sizeof(fBuf), "2xATK %ds", (int)remSec);
+    g_canvas.fillRoundRect(4, 89, 54, 12, 3, colPi());
+    g_canvas.setFont(nullptr);
+    g_canvas.setTextSize(1);
+    g_canvas.setTextColor(TFT_BLACK, colPi());
+    g_canvas.setTextDatum(middle_center);
+    g_canvas.drawString(fBuf, 31, 95);
   }
   if (g_combo < 2 || (millis() - g_lastComboMs) > COMBO_SHOW_MS) return;
   char cBuf[14];
@@ -1429,7 +1565,7 @@ static void drawDetailContent() {
   g_canvas.fillRoundRect(3, boxY, SCR_W - 6, boxH, 5, colSurface());
   g_canvas.drawRoundRect(3, boxY, SCR_W - 6, boxH, 5, colBorder());
 
-  // 左半: RPG 等级称号 + 今日完成/连胜
+  // 左半: RPG 等级称号 + 当前讨伐 Bug Boss + 击杀数
   g_canvas.setFont(nullptr);
   g_canvas.setTextSize(1);
   char lvTitle[20];
@@ -1438,19 +1574,17 @@ static void drawDetailContent() {
   g_canvas.setTextDatum(top_left);
   g_canvas.drawString(lvTitle, 8, boxY + 5);
 
-  g_canvas.setFont(&fonts::Font2);
+  char bossStr[20];
+  snprintf(bossStr, sizeof(bossStr), "vs %s", kBossNames[g_bossIdx]);
+  g_canvas.setTextColor(colCoral());
+  g_canvas.drawString(bossStr, 8, boxY + 19);
+
   g_canvas.setTextColor(colEmerald());
-  char dStr[12];
-  snprintf(dStr, sizeof(dStr), "%d done", g_todayDone);
-  g_canvas.drawString(dStr, 8, boxY + 15);
+  char sStr[20];
+  snprintf(sStr, sizeof(sStr), "Slain:%d OK:%d", g_bossKills, g_todayDone);
+  g_canvas.drawString(sStr, 8, boxY + 34);
 
-  g_canvas.setFont(nullptr);
-  g_canvas.setTextColor(colClaude());
-  char sStr[16];
-  snprintf(sStr, sizeof(sStr), "Streak %dd", g_streakDays);
-  g_canvas.drawString(sStr, 8, boxY + 35);
-
-  // 右半: EXP 进度条 + MOOD 进度条
+  // 右半: EXP 进度条 + BOSS HP 进度条
   int mx = 74, mw = SCR_W - 82;
   g_canvas.setTextColor(colPi());
   g_canvas.setTextDatum(top_left);
@@ -1465,19 +1599,19 @@ static void drawDetailContent() {
   int eFill = (mw - 2) * g_exp / 100;
   if (eFill > 1) g_canvas.fillRoundRect(mx + 1, eBarY + 1, eFill, barH - 2, 1, colPi());
 
-  uint16_t mCol = (g_mood >= 70) ? colEmerald() : (g_mood >= 35) ? colAmber() : colCoral();
-  g_canvas.setTextColor(mCol);
+  g_canvas.setTextColor(colCoral());
   g_canvas.setTextDatum(top_left);
-  g_canvas.drawString("MOOD", mx, boxY + 25);
-  char mVal[8];
-  snprintf(mVal, sizeof(mVal), "%d%%", g_mood);
+  g_canvas.drawString("BOSS", mx, boxY + 25);
+  char bVal[10];
+  int bossPct = (g_bossHp * 100) / max(1, g_bossMaxHp);
+  snprintf(bVal, sizeof(bVal), "%d%%", bossPct);
   g_canvas.setTextDatum(top_right);
-  g_canvas.drawString(mVal, mx + mw, boxY + 25);
+  g_canvas.drawString(bVal, mx + mw, boxY + 25);
 
   int mBarY = boxY + 35;
   g_canvas.fillRoundRect(mx, mBarY, mw, barH, 2, colSurfaceAlt());
-  int mFill = (mw - 2) * g_mood / 100;
-  if (mFill > 1) g_canvas.fillRoundRect(mx + 1, mBarY + 1, mFill, barH - 2, 1, mCol);
+  int mFill = (mw - 2) * constrain(bossPct, 0, 100) / 100;
+  if (mFill > 1) g_canvas.fillRoundRect(mx + 1, mBarY + 1, mFill, barH - 2, 1, colCoral());
 
   drawPageDots(1);
 }
@@ -1647,6 +1781,7 @@ static void applyState(PetState s) {
   if (s == PetState::DONE || s == PetState::ALL_DONE) {
     g_mood = min(100, g_mood + 10);
     addExp(25);
+    hitBoss(45, true);
     recordPulse(10);
     burstParticles(PT_STAR, colAmber(), 5);
   } else if (s == PetState::WORKING) {
@@ -1880,6 +2015,7 @@ static void handleCombo(const String& cmd) {
   if (g_combo > 0) {
     recordPulse(min(10, 4 + g_combo));
     addExp(4);
+    hitBoss(14 + min(30, g_combo * 4), g_combo >= 6);
     if (g_combo >= 5 && (g_combo % 5 == 0)) {
       burstParticles(PT_SPARK, colPi(), 5);
     }
@@ -2136,7 +2272,7 @@ void loop() {
         }
       }
 
-      // 3. 摇一摇检测
+      // 3. 摇一摇 -> D20 极客决策骰子 (Shake-to-Roll D20 Oracle)
       if (!isInteracting()) {
         float mag = sqrtf(ax * ax + ay * ay + az * az);
         if (mag > SHAKE_THRESHOLD) {
@@ -2145,8 +2281,27 @@ void loop() {
             g_shakeCount = 0;
             g_shakeActive  = true;
             g_shakeStartMs = millis();
-            g_shakePhrase  = kShakePhrases[esp_random() % SHAKE_PHRASE_COUNT];
-            g_mood = max(0, g_mood - 5);
+            int d20 = 1 + (esp_random() % 20);
+            if (d20 == 20) {
+              snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "D20=20 NAT CRIT!!");
+              addExp(30);
+              hitBoss(80, true);
+              burstParticles(PT_STAR, colAmber(), 8);
+            } else if (d20 >= 16) {
+              snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "D20=%d SHIP IT!", d20);
+              hitBoss(25, false);
+            } else if (d20 >= 11) {
+              snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "D20=%d LGTM ~", d20);
+              hitBoss(15, false);
+            } else if (d20 >= 6) {
+              snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "D20=%d ADD TESTS", d20);
+            } else if (d20 >= 2) {
+              snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "D20=%d REFACTOR..", d20);
+            } else {
+              snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "D20=1 DONT PUSH!");
+            }
+            g_shakePhrase = g_customBubbleBuf;
+            g_mood = min(100, g_mood + 5);
             closeGif();
             const GifEntry& pe = kPokeGifs[esp_random() % POKE_GIF_COUNT];
             size_t sz = pe.end - pe.start;
@@ -2241,20 +2396,102 @@ void loop() {
       }
     }
 
-    // BtnA 短按=戳一戳 (解锁全部 10 种趣味互动动画 + 经验值)
-    if (M5.BtnA.wasClicked() && !g_shakeActive && !g_feedActive) {
-      g_mood = min(100, g_mood + 5);
-      addExp(3);
-      recordPulse(5);
-      burstParticles(PT_HEART, colAmber(), 4);
-      markDirty();
+    // 整点静音健康提醒 (每逢整点 XX:00 触发饮水/伸展动画提醒)
+    int curMin = currentMinOfDay();
+    if (millis() > 15000 && (curMin % 60 == 0) && (curMin / 60 != g_lastChimeHour)) {
+      g_lastChimeHour = curMin / 60;
+      snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "%02d:00 HYDRATE! ~", g_lastChimeHour);
       g_pokeActive  = true;
       g_pokeStartMs = millis();
-      g_pokePhrase  = kPokePhrases[esp_random() % POKE_PHRASE_COUNT];
+      g_pokePhrase  = g_customBubbleBuf;
+      burstParticles(PT_STAR, colCodex(), 6);
       closeGif();
-      const GifEntry& pe = kPokeGifs[esp_random() % POKE_GIF_COUNT];
-      size_t sz = pe.end - pe.start;
-      if (g_frameBuf && g_gif.open((uint8_t*)pe.start, (int)sz, gifDraw)) {
+      size_t sz = watering_gif_end - watering_gif_start;
+      if (g_frameBuf && g_gif.open((uint8_t*)watering_gif_start, (int)sz, gifDraw)) {
+        g_gif.setDrawType(GIF_DRAW_COOKED);
+        g_gif.setFrameBuf(g_frameBuf);
+        g_gifOpen = true;
+        g_frameDelayMs = 50;
+        g_lastFrameMs  = 0;
+        g_canvas.fillScreen(BG_COLOR);
+      }
+    }
+
+    // BtnA 短按: 捕捉流星 / 双击赛博扭蛋机 (Cyber Gacha) / 单击戳一戳攻击 Boss
+    if (M5.BtnA.wasClicked() && !g_shakeActive && !g_feedActive) {
+      uint32_t clickNow = millis();
+      bool isDouble = (clickNow - g_lastBtnAClickMs) <= 450;
+      g_lastBtnAClickMs = clickNow;
+
+      const uint8_t* chosenStart = nullptr;
+      const uint8_t* chosenEnd   = nullptr;
+
+      if (g_shootActive) {
+        // 1. 成功捕捉夜空流星!
+        g_shootActive = false;
+        snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "STAR WISH! +40XP");
+        g_pokePhrase = g_customBubbleBuf;
+        addExp(40);
+        hitBoss(65, true);
+        burstParticles(PT_STAR, colAmber(), 8);
+        chosenStart = cheer_gif_start;
+        chosenEnd   = cheer_gif_end;
+      } else if (isDouble) {
+        // 2. 双击 BtnA -> 赛博幸运扭蛋机 (Cyber Gacha)
+        int roll = esp_random() % 6;
+        if (roll == 0) {
+          snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "SSR! 0-BUG +40XP");
+          g_feverUntilMs = clickNow + 180000UL;
+          addExp(40);
+          hitBoss(75, true);
+          burstParticles(PT_STAR, colAmber(), 8);
+          chosenStart = cheer_gif_start; chosenEnd = cheer_gif_end;
+        } else if (roll == 1) {
+          snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "777 JACKPOT! +50");
+          addExp(50);
+          hitBoss(110, true);
+          burstParticles(PT_HEART, colCoral(), 8);
+          chosenStart = dragon_boat_gif_start; chosenEnd = dragon_boat_gif_end;
+        } else if (roll == 2) {
+          snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "BUFF: 2xATK 3min");
+          g_feverUntilMs = clickNow + 180000UL;
+          hitBoss(45, true);
+          burstParticles(PT_SPARK, colPi(), 7);
+          chosenStart = singing_gif_start; chosenEnd = singing_gif_end;
+        } else if (roll == 3) {
+          snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "SR! 1-SHOT PASS~");
+          addExp(25);
+          hitBoss(40, false);
+          chosenStart = gaming_gif_start; chosenEnd = gaming_gif_end;
+        } else if (roll == 4) {
+          snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "Gacha: Coffee ~");
+          addExp(15);
+          chosenStart = coffee_gif_start; chosenEnd = coffee_gif_end;
+        } else {
+          snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "Gacha: Game Time");
+          addExp(15);
+          chosenStart = gaming_gif_start; chosenEnd = gaming_gif_end;
+        }
+        g_pokePhrase = g_customBubbleBuf;
+      } else {
+        // 3. 普通单击戳一戳 + 攻击当前 Bug Boss
+        addExp(3);
+        hitBoss(18, false);
+        burstParticles(PT_HEART, colAmber(), 4);
+        g_pokePhrase = kPokePhrases[esp_random() % POKE_PHRASE_COUNT];
+        const GifEntry& pe = kPokeGifs[esp_random() % POKE_GIF_COUNT];
+        chosenStart = pe.start;
+        chosenEnd   = pe.end;
+      }
+
+      g_mood = min(100, g_mood + 6);
+      recordPulse(7);
+      markDirty();
+      g_pokeActive  = true;
+      g_pokeStartMs = clickNow;
+      closeGif();
+      size_t sz = chosenEnd - chosenStart;
+      if (g_frameBuf && g_gif.open((uint8_t*)chosenStart, (int)sz, gifDraw)) {
         g_gif.setDrawType(GIF_DRAW_COOKED);
         g_gif.setFrameBuf(g_frameBuf);
         g_gifOpen = true;
