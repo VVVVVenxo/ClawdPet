@@ -120,6 +120,11 @@ class Daemon:
 
         # Token 用量
         self.last_tok = None                  # 去重用
+        self.last_time = None                 # #time HH:MM 去重用
+        self._tok_cache = {}                  # fpath -> (mtime, size, in_tok, out_tok, cache_tok)
+        self._tok_cache_day = ""
+        self._log_lock = threading.Lock()
+        self._log_fp = None
 
         # 工具连击计数 (Combo)
         self.combo_count = 0
@@ -170,12 +175,19 @@ class Daemon:
     def log(self, msg):
         line = f"[daemon] {time.strftime('%H:%M:%S')} {msg}"
         print(line, flush=True)
-        try:
-            log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "daemon.log")
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        except Exception:
-            pass
+        with self._log_lock:
+            try:
+                if self._log_fp is None:
+                    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "daemon.log")
+                    self._log_fp = open(log_path, "a", encoding="utf-8", buffering=1)
+                self._log_fp.write(line + "\n")
+            except Exception:
+                try:
+                    if self._log_fp is not None:
+                        self._log_fp.close()
+                except Exception:
+                    pass
+                self._log_fp = None
 
     def _serial_read_loop(self):
         buf = b""
@@ -263,8 +275,9 @@ class Daemon:
             self.push_hist()
             self.push_today()
             self.last_tok = None
+            self.last_time = None
         try:
-            self.push_time()
+            self.push_time(force=True)
             self.push_tok()
         except Exception as e:
             self.log(f"resync time/tok error: {e}")
@@ -370,8 +383,11 @@ class Daemon:
         self.log(f"-> {line}")
 
     # --- 校时行: #time HH:MM (电脑本地时间) ---
-    def push_time(self):
+    def push_time(self, force=False):
         hhmm = time.strftime("%H:%M")
+        if not force and hhmm == self.last_time:
+            return
+        self.last_time = hhmm
         self._write_line(f"#time {hhmm}")
         self.log(f"-> #time {hhmm}")
 
@@ -389,10 +405,13 @@ class Daemon:
         self._write_line(f"#today D={self.daily_done} S={self.streak_days}")
         self.log(f"-> #today D={self.daily_done} S={self.streak_days}")
 
-    # --- Token 用量扫描: 联合扫描 Claude / Codex / Pi 今日所有 session ---
+    # --- Token 用量扫描: 联合扫描 Claude / Codex / Pi 今日所有 session (带文件级 mtime+size 缓存) ---
     def _scan_token_usage(self):
         today_str = time.strftime("%Y-%m-%d")
         today_start = time.mktime(time.strptime(today_str, "%Y-%m-%d"))
+        if self._tok_cache_day != today_str:
+            self._tok_cache.clear()
+            self._tok_cache_day = today_str
 
         total_in = 0
         total_out = 0
@@ -410,35 +429,42 @@ class Daemon:
                         continue
                     fpath = os.path.join(root, fname)
                     try:
-                        if os.path.getmtime(fpath) < today_start:
+                        st = os.stat(fpath)
+                        if st.st_mtime < today_start:
                             continue
                     except OSError:
                         continue
-                    try:
-                        with open(fpath, "r", encoding="utf-8",
-                                  errors="replace") as f:
-                            for line in f:
-                                if '"assistant"' not in line:
-                                    continue
-                                try:
-                                    obj = json.loads(line)
-                                except (json.JSONDecodeError, ValueError):
-                                    continue
-                                if obj.get("type") != "assistant":
-                                    continue
-                                usage = obj.get("message", {}).get("usage")
-                                if not usage:
-                                    continue
-                                i = usage.get("input_tokens", 0)
-                                o = usage.get("output_tokens", 0)
-                                ca = (usage.get("cache_creation_input_tokens", 0)
-                                      + usage.get("cache_read_input_tokens", 0))
-                                total_in += i
-                                total_out += o
-                                total_cache += ca
-                                claude_tok += i + o
-                    except (OSError, IOError):
-                        continue
+                    cached = self._tok_cache.get(fpath)
+                    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+                        f_in, f_out, f_ca = cached[2], cached[3], cached[4]
+                    else:
+                        f_in = f_out = f_ca = 0
+                        try:
+                            with open(fpath, "r", encoding="utf-8",
+                                      errors="replace") as f:
+                                for line in f:
+                                    if '"assistant"' not in line:
+                                        continue
+                                    try:
+                                        obj = json.loads(line)
+                                    except (json.JSONDecodeError, ValueError):
+                                        continue
+                                    if obj.get("type") != "assistant":
+                                        continue
+                                    usage = obj.get("message", {}).get("usage")
+                                    if not usage:
+                                        continue
+                                    f_in += usage.get("input_tokens", 0)
+                                    f_out += usage.get("output_tokens", 0)
+                                    f_ca += (usage.get("cache_creation_input_tokens", 0)
+                                             + usage.get("cache_read_input_tokens", 0))
+                            self._tok_cache[fpath] = (st.st_mtime, st.st_size, f_in, f_out, f_ca)
+                        except (OSError, IOError):
+                            continue
+                    total_in += f_in
+                    total_out += f_out
+                    total_cache += f_ca
+                    claude_tok += f_in + f_out
 
         # 2. Codex (~/.codex/sessions/**/*.jsonl)
         codex_dir = os.path.expanduser("~/.codex/sessions")
@@ -449,39 +475,46 @@ class Daemon:
                         continue
                     fpath = os.path.join(root, fname)
                     try:
-                        if os.path.getmtime(fpath) < today_start:
+                        st = os.stat(fpath)
+                        if st.st_mtime < today_start:
                             continue
                     except OSError:
                         continue
-                    try:
-                        last_tot = None
-                        with open(fpath, "r", encoding="utf-8",
-                                  errors="replace") as f:
-                            for line in f:
-                                if '"token_count"' not in line:
-                                    continue
-                                try:
-                                    obj = json.loads(line)
-                                except (json.JSONDecodeError, ValueError):
-                                    continue
-                                if (obj.get("type") == "event_msg"
-                                        and obj.get("payload", {}).get("type") == "token_count"):
-                                    info = obj.get("payload", {}).get("info") or {}
-                                    tot = info.get("total_token_usage")
-                                    if tot:
-                                        last_tot = tot
-                        if last_tot:
-                            raw_i = last_tot.get("input_tokens", 0)
-                            cached_i = last_tot.get("cached_input_tokens", 0)
-                            ca = cached_i + last_tot.get("cache_write_input_tokens", 0)
-                            i = max(0, raw_i - cached_i)
-                            o = last_tot.get("output_tokens", 0)
-                            total_in += i
-                            total_out += o
-                            total_cache += ca
-                            codex_tok += i + o
-                    except (OSError, IOError):
-                        continue
+                    cached = self._tok_cache.get(fpath)
+                    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+                        f_in, f_out, f_ca = cached[2], cached[3], cached[4]
+                    else:
+                        f_in = f_out = f_ca = 0
+                        try:
+                            last_tot = None
+                            with open(fpath, "r", encoding="utf-8",
+                                      errors="replace") as f:
+                                for line in f:
+                                    if '"token_count"' not in line:
+                                        continue
+                                    try:
+                                        obj = json.loads(line)
+                                    except (json.JSONDecodeError, ValueError):
+                                        continue
+                                    if (obj.get("type") == "event_msg"
+                                            and obj.get("payload", {}).get("type") == "token_count"):
+                                        info = obj.get("payload", {}).get("info") or {}
+                                        tot = info.get("total_token_usage")
+                                        if tot:
+                                            last_tot = tot
+                            if last_tot:
+                                raw_i = last_tot.get("input_tokens", 0)
+                                cached_i = last_tot.get("cached_input_tokens", 0)
+                                f_ca = cached_i + last_tot.get("cache_write_input_tokens", 0)
+                                f_in = max(0, raw_i - cached_i)
+                                f_out = last_tot.get("output_tokens", 0)
+                            self._tok_cache[fpath] = (st.st_mtime, st.st_size, f_in, f_out, f_ca)
+                        except (OSError, IOError):
+                            continue
+                    total_in += f_in
+                    total_out += f_out
+                    total_cache += f_ca
+                    codex_tok += f_in + f_out
 
         # 3. Pi (~/.pi/agent/sessions/**/*.jsonl)
         pi_dir = os.path.expanduser("~/.pi/agent/sessions")
@@ -492,37 +525,44 @@ class Daemon:
                         continue
                     fpath = os.path.join(root, fname)
                     try:
-                        if os.path.getmtime(fpath) < today_start:
+                        st = os.stat(fpath)
+                        if st.st_mtime < today_start:
                             continue
                     except OSError:
                         continue
-                    try:
-                        with open(fpath, "r", encoding="utf-8",
-                                  errors="replace") as f:
-                            for line in f:
-                                if '"usage"' not in line:
-                                    continue
-                                try:
-                                    obj = json.loads(line)
-                                except (json.JSONDecodeError, ValueError):
-                                    continue
-                                if obj.get("type") != "message":
-                                    continue
-                                msg = obj.get("message") or {}
-                                if msg.get("role") != "assistant":
-                                    continue
-                                usage = msg.get("usage")
-                                if not usage:
-                                    continue
-                                i = usage.get("input", 0)
-                                o = usage.get("output", 0)
-                                ca = usage.get("cacheRead", 0) + usage.get("cacheWrite", 0)
-                                total_in += i
-                                total_out += o
-                                total_cache += ca
-                                pi_tok += i + o
-                    except (OSError, IOError):
-                        continue
+                    cached = self._tok_cache.get(fpath)
+                    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+                        f_in, f_out, f_ca = cached[2], cached[3], cached[4]
+                    else:
+                        f_in = f_out = f_ca = 0
+                        try:
+                            with open(fpath, "r", encoding="utf-8",
+                                      errors="replace") as f:
+                                for line in f:
+                                    if '"usage"' not in line:
+                                        continue
+                                    try:
+                                        obj = json.loads(line)
+                                    except (json.JSONDecodeError, ValueError):
+                                        continue
+                                    if obj.get("type") != "message":
+                                        continue
+                                    msg = obj.get("message") or {}
+                                    if msg.get("role") != "assistant":
+                                        continue
+                                    usage = msg.get("usage")
+                                    if not usage:
+                                        continue
+                                    f_in += usage.get("input", 0)
+                                    f_out += usage.get("output", 0)
+                                    f_ca += usage.get("cacheRead", 0) + usage.get("cacheWrite", 0)
+                            self._tok_cache[fpath] = (st.st_mtime, st.st_size, f_in, f_out, f_ca)
+                        except (OSError, IOError):
+                            continue
+                    total_in += f_in
+                    total_out += f_out
+                    total_cache += f_ca
+                    pi_tok += f_in + f_out
 
         return (total_in, total_out, total_cache, claude_tok, codex_tok, pi_tok)
 
@@ -606,14 +646,14 @@ class Daemon:
             self.log(f"-> #festival {name}")
 
     def time_loop(self):
-        self.push_time()
+        self.push_time(force=True)
         self._check_festival()
         self.push_tok()
         # 启动后第 2s 和第 5s 额外补发校时, 彻底杜绝设备刚开机漏包
         for delay in (2.0, 3.0):
             time.sleep(delay)
             try:
-                self.push_time()
+                self.push_time(force=True)
             except Exception:
                 pass
         while True:
@@ -638,12 +678,17 @@ class Daemon:
                 ts = self.state_timestamps.get(sid, now)
                 if st in ("running", "waiting") and (now - ts) >= STALE_SESSION_SEC:
                     self.log(f"stale session {sid[:8]} ({st} for "
-                             f"{int(now - ts)}s), marking idle")
-                    self.mgr.idle_task(sid)
+                             f"{int(now - ts)}s), removing")
+                    self.mgr.remove_task(sid)
                     self.state_timestamps.pop(sid, None)
                     self.tools.pop(sid, None)
                 elif st == "done" and (now - ts) >= IDLE_AFTER_SEC:
                     # Codex / Pi 没有 NotificationIdle, 完成超过 15s 自动归档移除
+                    self.mgr.remove_task(sid)
+                    self.state_timestamps.pop(sid, None)
+                    self.tools.pop(sid, None)
+                elif st == "pending" and (now - ts) >= 120.0:
+                    # 超过 2 分钟未活动的 pending 会话自动清理, 防止详情页堆积旧会话
                     self.mgr.remove_task(sid)
                     self.state_timestamps.pop(sid, None)
                     self.tools.pop(sid, None)
