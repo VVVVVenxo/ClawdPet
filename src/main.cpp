@@ -87,8 +87,8 @@ static bool     g_charging   = false;
 static uint32_t g_lastBattMs = 0;
 static const uint32_t BATT_POLL_MS = 5000;
 
-// --- 页面切换 (BtnB 循环: MAIN -> DETAIL -> TOKEN -> MAIN) ---
-enum class Page { MAIN, DETAIL, TOKEN };
+// --- 页面切换 (BtnB 四页循环: MAIN -> DETAIL -> BOSS -> TOKEN -> MAIN) ---
+enum class Page { MAIN = 0, DETAIL = 1, BOSS = 2, TOKEN = 3 };
 static Page     g_page = Page::MAIN;
 static bool     g_detailDirty = true;
 static int      g_detailScroll = 0;
@@ -116,6 +116,8 @@ static int      g_bossHp           = 300;
 static int      g_bossKills        = 0;
 static uint32_t g_bossHitMs        = 0;
 static uint32_t g_feverUntilMs     = 0;   // 双倍算力暴击 BUFF 截止时刻
+static char     g_battleLog[26]    = "Tap [BtnA] to Slash!";
+static uint8_t  g_lastSkillHighlight = 0; // 1=Slash, 2=Gacha, 3=Heal
 
 // 舞台伤害飘字 (-25 / CRIT -68!)
 static bool     g_dmgActive        = false;
@@ -530,6 +532,9 @@ static void hitBoss(int baseDmg, bool forceCrit = false) {
   if (crit) snprintf(g_dmgText, sizeof(g_dmgText), "CRIT -%d!", dmg);
   else      snprintf(g_dmgText, sizeof(g_dmgText), "-%d", dmg);
 
+  if (crit) snprintf(g_battleLog, sizeof(g_battleLog), "CRIT! -%d HP to %s", dmg, kBossNames[g_bossIdx]);
+  else      snprintf(g_battleLog, sizeof(g_battleLog), "HIT! -%d HP to %s", dmg, kBossNames[g_bossIdx]);
+
   if (g_bossHp <= 0) {
     g_bossKills++;
     g_bossIdx   = (g_bossIdx + 1) % BOSS_COUNT;
@@ -538,6 +543,7 @@ static void hitBoss(int baseDmg, bool forceCrit = false) {
     addExp(45);
     burstParticles(PT_STAR, colAmber(), 8);
     snprintf(g_customBubbleBuf, sizeof(g_customBubbleBuf), "BOSS SLAIN! +45XP");
+    snprintf(g_battleLog, sizeof(g_battleLog), "SLAIN! +45XP -> %s", kBossNames[g_bossIdx]);
     g_pokeActive  = true;
     g_pokeStartMs = millis();
     g_pokePhrase  = g_customBubbleBuf;
@@ -944,12 +950,12 @@ static void drawStageAtmosphereAndParticles() {
   }
 }
 
-// 绘制底部三页圆点指示器 (用于 Page 2 / Page 3)
+// 绘制底部四页圆点指示器 (用于 Page 2 / Page 3 / Page 4)
 static void drawPageDots(int activePage) {
   int y = 236;
   int cx = SCR_W / 2;
-  for (int i = 0; i < 3; i++) {
-    int x = cx + (i - 1) * 10;
+  for (int i = 0; i < 4; i++) {
+    int x = cx - 15 + i * 10;
     if (i == activePage) {
       g_canvas.fillRoundRect(x - 4, y - 1, 8, 3, 1, colCodex());
     } else {
@@ -958,22 +964,64 @@ static void drawPageDots(int activePage) {
   }
 }
 
+// 赛博装甲卡片外框: 深色底板 + 细边框 + 四角霓虹高光护角 (⌜ ⌝ ⌞ ⌟)
+static void drawCyberCard(int x, int y, int w, int h, uint16_t bgCol, uint16_t borderCol, uint16_t cornerCol) {
+  g_canvas.fillRoundRect(x, y, w, h, 3, bgCol);
+  g_canvas.drawRoundRect(x, y, w, h, 3, borderCol);
+  int cl = 4;
+  // 左上角
+  g_canvas.drawFastHLine(x, y, cl, cornerCol);
+  g_canvas.drawFastVLine(x, y, cl, cornerCol);
+  // 右上角
+  g_canvas.drawFastHLine(x + w - cl, y, cl, cornerCol);
+  g_canvas.drawFastVLine(x + w - 1, y, cl, cornerCol);
+  // 左下角
+  g_canvas.drawFastHLine(x, y + h - 1, cl, cornerCol);
+  g_canvas.drawFastVLine(x, y + h - cl, cl, cornerCol);
+  // 右下角
+  g_canvas.drawFastHLine(x + w - cl, y + h - 1, cl, cornerCol);
+  g_canvas.drawFastVLine(x + w - 1, y + h - cl, cl, cornerCol);
+}
+
+// 严格按像素宽度裁切字符串 (兼容 UTF-8 中文字符边界, 绝不越界重叠)
+static void drawClippedString(const String& raw, int x, int y, int maxPx, textdatum_t datum = top_left) {
+  g_canvas.setTextDatum(datum);
+  if (raw.length() == 0 || maxPx <= 0) return;
+  if (g_canvas.textWidth(raw) <= maxPx) {
+    g_canvas.drawString(raw, x, y);
+    return;
+  }
+  int len = raw.length();
+  while (len > 0) {
+    len--;
+    // 跳过 UTF-8 续字节 (10xxxxxx), 保证不在多字节字符中间截断
+    while (len > 0 && ((uint8_t)raw[len] & 0xC0) == 0x80) {
+      len--;
+    }
+    String sub = raw.substring(0, len);
+    if (g_canvas.textWidth(sub) <= maxPx) {
+      g_canvas.drawString(sub, x, y);
+      return;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
-// 通用顶栏 (y: 0..17): 时间/番茄钟 | Lv.x + 爱心心情 | 电池 + 底部 EXP 细条
+// 通用顶栏 (y: 0..17): 时间 | [Lv.x] 胶囊 + 跳动像素爱心 | 电池 + 2px EXP 光条
 // ---------------------------------------------------------------------------
 static void drawStatusBarOverlay() {
   g_canvas.fillRect(0, 0, SCR_W, 18, colSurfaceAlt());
+  g_canvas.drawFastHLine(0, 16, SCR_W, g_canvas.color565(22, 28, 42));
   g_canvas.drawFastHLine(0, 17, SCR_W, colBorder());
-  // 顶栏底边 1px RPG 经验进度条 (EXP Bar)
-  int expW = (SCR_W * g_exp) / 100;
+  // 顶栏底边 2px 霓虹 RPG 经验条 + 亮白光标头
+  int expW = (SCR_W * constrain(g_exp, 0, 100)) / 100;
   if (expW > 0) {
-    g_canvas.drawFastHLine(0, 17, expW, colPi());
+    g_canvas.drawFastHLine(0, 16, expW, colPi());
+    g_canvas.drawFastHLine(0, 17, expW, colCodex());
+    g_canvas.fillRect(max(0, expW - 2), 16, 2, 2, TFT_WHITE);
   }
 
-  g_canvas.setFont(nullptr);
-  g_canvas.setTextSize(1);
-
-  // 左: 永远固定显示 24h 时间 (有编译时间与 NVS 兜底, 永不出现 --:--)
+  // 左: 永远固定显示 24h 时间
   char ts[12];
   int m = currentMinOfDay();
   snprintf(ts, sizeof(ts), "%02d:%02d", m / 60, m % 60);
@@ -981,9 +1029,9 @@ static void drawStatusBarOverlay() {
   g_canvas.setTextSize(1);
   g_canvas.setTextColor(TFT_WHITE, colSurfaceAlt());
   g_canvas.setTextDatum(top_left);
-  g_canvas.drawString(ts, 4, 5);
+  g_canvas.drawString(ts, 3, 4);
 
-  // 若开启专注番茄钟, 在后台检查完成并在舞台左上角显示胶囊
+  // 若开启专注番茄钟, 在后台检查完成
   if (g_pomoActive) {
     uint32_t elapsed = millis() - g_pomoStartMs;
     if (elapsed >= POMO_TOTAL_MS) {
@@ -997,23 +1045,28 @@ static void drawStatusBarOverlay() {
     }
   }
 
-  // 中: Lv.n + 像素小爱心 + 心情
+  // 中左: 金色装甲胶囊 [L22] (x=36..60)
   char lvStr[8];
   snprintf(lvStr, sizeof(lvStr), "L%d", g_level);
-  g_canvas.setTextColor(colAmber(), colSurfaceAlt());
-  g_canvas.setTextDatum(top_left);
-  g_canvas.drawString(lvStr, 40, 5);
+  int lvW = (g_level >= 10) ? 23 : 17;
+  g_canvas.fillRoundRect(36, 2, lvW, 12, 2, g_canvas.color565(55, 42, 14));
+  g_canvas.drawRoundRect(36, 2, lvW, 12, 2, colAmber());
+  g_canvas.setTextColor(colAmber());
+  g_canvas.setTextDatum(middle_center);
+  g_canvas.drawString(lvStr, 36 + lvW / 2, 8);
 
+  // 中右: 呼吸跳动像素爱心 + 心情值
   uint16_t moodCol = (g_mood >= 70) ? colEmerald()
                    : (g_mood >= 35) ? colAmber()
                    : colCoral();
-  int hx = (g_level >= 10) ? 60 : 54;
-  drawPixelHeart(hx, 6, moodCol);
+  int hx = 36 + lvW + 4;
+  int hy = 5 + (((millis() / 600) % 2 == 0) ? 0 : 1);
+  drawPixelHeart(hx, hy, moodCol);
   char ms[6];
   snprintf(ms, sizeof(ms), "%d", g_mood);
   g_canvas.setTextColor(moodCol, colSurfaceAlt());
   g_canvas.setTextDatum(top_left);
-  g_canvas.drawString(ms, hx + 9, 5);
+  g_canvas.drawString(ms, hx + 9, 4);
 
   // 右: 电池百分比 + 电池图标
   int pct = g_battLevel < 0 ? 0 : g_battLevel;
@@ -1023,15 +1076,15 @@ static void drawStatusBarOverlay() {
 
   char ps[6];
   snprintf(ps, sizeof(ps), "%d%%", pct);
-  int bx = SCR_W - 4 - 16;
-  int by = 4;
+  int bx = SCR_W - 4 - 15;
+  int by = 3;
   g_canvas.setTextColor(bCol, colSurfaceAlt());
   g_canvas.setTextDatum(top_right);
-  g_canvas.drawString(ps, bx - 2, 5);
+  g_canvas.drawString(ps, bx - 2, 4);
 
-  g_canvas.drawRect(bx, by, 16, 9, bCol);
-  g_canvas.fillRect(bx + 16, by + 2, 2, 5, bCol);
-  int fillW = (14 * pct) / 100;
+  g_canvas.drawRect(bx, by, 15, 9, bCol);
+  g_canvas.fillRect(bx + 15, by + 2, 2, 5, bCol);
+  int fillW = (13 * pct) / 100;
   if (fillW > 0) g_canvas.fillRect(bx + 1, by + 1, fillW, 7, bCol);
 }
 
@@ -1056,7 +1109,7 @@ static void getAgentActiveCounts(int* outC, int* outX, int* outP) {
   *outC = c; *outX = x; *outP = p;
 }
 
-// 绘制单个三端迷你胶囊 (C:n / X:n / P:n)
+// 绘制单个三端迷你立体胶囊 (C:n / X:n / P:n)
 static void drawAgentPill(int x, int y, int w, int h, char label, int count, uint16_t brandCol, uint16_t dimCol) {
   char buf[8];
   snprintf(buf, sizeof(buf), "%c:%d", label, count);
@@ -1064,10 +1117,12 @@ static void drawAgentPill(int x, int y, int w, int h, char label, int count, uin
   g_canvas.setTextSize(1);
   if (count > 0) {
     g_canvas.fillRoundRect(x, y, w, h, 3, brandCol);
+    g_canvas.drawFastHLine(x + 2, y + 1, w - 4, TFT_WHITE);
     g_canvas.setTextColor(TFT_BLACK, brandCol);
   } else {
     g_canvas.fillRoundRect(x, y, w, h, 3, colSurfaceAlt());
     g_canvas.drawRoundRect(x, y, w, h, 3, dimCol);
+    g_canvas.drawFastHLine(x + 3, y, w - 6, brandCol);
     g_canvas.setTextColor(brandCol, colSurfaceAlt());
   }
   g_canvas.setTextDatum(middle_center);
@@ -1075,18 +1130,19 @@ static void drawAgentPill(int x, int y, int w, int h, char label, int count, uin
 }
 
 // ---------------------------------------------------------------------------
-// 底部双行 HUD 底座 (y=202..239):
-//   第一行: [C:n] [X:n] [P:n] 三端实时胶囊
-//   第二行: OK:n | 实时算力脉冲心电图 (ECG Sparkline) | 页码三点
+// 底部双行赛博 HUD 底座 (y=202..239):
+//   顶边 2px: 实时 Bug Boss 血条 + 受击闪白
+//   第一行: [C:n] [X:n] [P:n] 三端立体胶囊
+//   第二行: OK:n | 示波器网格脉冲心电图 (带亮白扫描头) | 四页指示点
 // ---------------------------------------------------------------------------
 static void drawBottomHudDock() {
   int dockY = 202, dockH = 37;
-  g_canvas.fillRoundRect(2, dockY, SCR_W - 4, dockH, 5, colSurface());
-  g_canvas.drawRoundRect(2, dockY, SCR_W - 4, dockH, 5, colBorder());
+  drawCyberCard(2, dockY, SCR_W - 4, dockH, colSurface(), colBorder(), colCodex());
+
   // 顶部亮边: 兼具舞台发光地板线 + 实时 Bug Boss 血条 (2px)
-  int barTrackW = SCR_W - 12;
-  g_canvas.drawFastHLine(6, dockY,     barTrackW, colSurfaceAlt());
-  g_canvas.drawFastHLine(6, dockY + 1, barTrackW, colSurfaceAlt());
+  int barTrackW = SCR_W - 14;
+  g_canvas.drawFastHLine(7, dockY,     barTrackW, colSurfaceAlt());
+  g_canvas.drawFastHLine(7, dockY + 1, barTrackW, colSurfaceAlt());
   int bossFillW = (barTrackW * constrain(g_bossHp, 0, g_bossMaxHp)) / max(1, g_bossMaxHp);
   bool bossHitFlash = (millis() - g_bossHitMs) < 350;
   bool feverActive  = (millis() < g_feverUntilMs);
@@ -1095,14 +1151,14 @@ static void drawBottomHudDock() {
                         : (g_state == PetState::WORKING) ? colCoral()
                         : colAmber();
   if (bossFillW > 0) {
-    g_canvas.drawFastHLine(6, dockY,     bossFillW, stageLineCol);
-    g_canvas.drawFastHLine(6, dockY + 1, bossFillW, stageLineCol);
+    g_canvas.drawFastHLine(7, dockY,     bossFillW, stageLineCol);
+    g_canvas.drawFastHLine(7, dockY + 1, bossFillW, stageLineCol);
   }
 
   int cAct = 0, xAct = 0, pAct = 0;
   getAgentActiveCounts(&cAct, &xAct, &pAct);
 
-  // 第一行 (y=205..218): 三端状态胶囊居中均分
+  // 第一行 (y=206..218): 三端状态胶囊居中均分
   int pillW = 38, pillH = 13, gap = 4;
   int startX = (SCR_W - (pillW * 3 + gap * 2)) / 2;
   int row1Y = dockY + 4;
@@ -1110,8 +1166,8 @@ static void drawBottomHudDock() {
   drawAgentPill(startX + pillW + gap,     row1Y, pillW, pillH, 'X', xAct, colCodex(),  agentDimColor('X'));
   drawAgentPill(startX + (pillW + gap)*2, row1Y, pillW, pillH, 'P', pAct, colPi(),     agentDimColor('P'));
 
-  // 第二行 (y=221..235): 左=OK:n  中=实时算力脉冲心电图  右=页码三点
-  int row2Y = dockY + 26;
+  // 第二行 (y=221..235): 左=OK:n  中=示波器网格心电图  右=四页指示点
+  int row2Y = dockY + 27;
   g_canvas.setFont(nullptr);
   g_canvas.setTextSize(1);
 
@@ -1119,28 +1175,40 @@ static void drawBottomHudDock() {
   snprintf(doneBuf, sizeof(doneBuf), "OK:%d", g_todayDone);
   g_canvas.setTextColor(colEmerald(), colSurface());
   g_canvas.setTextDatum(middle_left);
-  g_canvas.drawString(doneBuf, 7, row2Y);
+  g_canvas.drawString(doneBuf, 6, row2Y);
 
-  // 中间 (x=42..106): 实时算力脉冲波形 (ECG Sparkline)
-  int spX = 43, spW = 64, spBaseY = dockY + 32;
-  g_canvas.drawFastHLine(spX, spBaseY, spW, colSurfaceAlt());
+  // 中间 (x=37..97): 带暗网格与亮白扫描头的迷你示波器 (Mini Oscilloscope)
+  int spX = 37, spY = dockY + 20, spW = 60, spH = 13;
+  g_canvas.fillRoundRect(spX, spY, spW, spH, 2, colSurfaceAlt());
+  g_canvas.drawRoundRect(spX, spY, spW, spH, 2, g_canvas.color565(30, 42, 62));
+  for (int gx = spX + 10; gx < spX + spW - 4; gx += 12) {
+    g_canvas.drawPixel(gx, spY + 4, g_canvas.color565(28, 38, 56));
+    g_canvas.drawPixel(gx, spY + 9, g_canvas.color565(28, 38, 56));
+  }
+  int spBaseY = spY + spH - 2;
   uint16_t waveCol = (g_combo >= 5) ? colPi()
                    : (g_state == PetState::WORKING) ? colAmber()
                    : colCodex();
+  int lastX = spX + 2, lastY = spBaseY - 1;
   for (int i = 0; i < SPARK_LEN - 1; i++) {
-    int x0 = spX + (i * spW) / (SPARK_LEN - 1);
-    int x1 = spX + ((i + 1) * spW) / (SPARK_LEN - 1);
-    int y0 = spBaseY - g_spark[i];
-    int y1 = spBaseY - g_spark[i + 1];
+    int x0 = spX + 2 + (i * (spW - 5)) / (SPARK_LEN - 1);
+    int x1 = spX + 2 + ((i + 1) * (spW - 5)) / (SPARK_LEN - 1);
+    int y0 = constrain(spBaseY - g_spark[i],     spY + 2, spBaseY);
+    int y1 = constrain(spBaseY - g_spark[i + 1], spY + 2, spBaseY);
     g_canvas.drawLine(x0, y0, x1, y1, waveCol);
+    lastX = x1;
+    lastY = y1;
   }
+  // 扫描头高亮脉冲点
+  g_canvas.fillRect(lastX - 1, lastY - 1, 2, 2, TFT_WHITE);
 
-  // 右下角: 紧凑页码三点
-  int dotBaseX = SCR_W - 19;
+  // 右下角: 四页指示点 (━ ○ ○ ○)
+  int dotBaseX = 104;
   int dotY = row2Y;
-  g_canvas.fillRoundRect(dotBaseX - 3, dotY - 1, 6, 3, 1, colCodex());
-  g_canvas.fillCircle(dotBaseX + 6, dotY, 1, colBorder());
-  g_canvas.fillCircle(dotBaseX + 11, dotY, 1, colBorder());
+  g_canvas.fillRoundRect(dotBaseX - 2, dotY - 1, 6, 3, 1, colCodex());
+  g_canvas.fillCircle(dotBaseX + 7,  dotY, 1, colBorder());
+  g_canvas.fillCircle(dotBaseX + 13, dotY, 1, colBorder());
+  g_canvas.fillCircle(dotBaseX + 19, dotY, 1, colBorder());
 }
 
 // 收集当前活跃 (W/R) 会话下标, W 优先于 R
@@ -1178,9 +1246,8 @@ static void drawSessionCardsOverlay() {
       uint16_t stripeCol = s.hasColor ? s.color : agCol;
       uint16_t borderCol = isWait ? (blink ? colCodex() : colBorder()) : colBorder();
 
-      g_canvas.fillRoundRect(3, cy, SCR_W - 6, ch, 4, colSurface());
-      g_canvas.drawRoundRect(3, cy, SCR_W - 6, ch, 4, borderCol);
-      g_canvas.fillRoundRect(4, cy + 2, 3, ch - 4, 1, stripeCol);
+      drawCyberCard(3, cy, SCR_W - 6, ch, colSurface(), borderCol, agCol);
+      g_canvas.fillRoundRect(5, cy + 3, 2, ch - 6, 1, stripeCol);
 
       // 平台微徽章 [C]/[X]/[P]
       g_canvas.fillRoundRect(9, cy + 3, 11, 11, 2, agentDimColor(s.agent));
@@ -1191,29 +1258,30 @@ static void drawSessionCardsOverlay() {
       char agStr[2] = { s.agent ? s.agent : 'C', '\0' };
       g_canvas.drawString(agStr, 14, cy + 8);
 
-      // 项目名称
+      // 项目名称: 严格限制最大像素宽度 58px (x=23..81), 绝不与右侧工具胶囊重叠!
       g_canvas.setFont(&fonts::efontCN_12);
       g_canvas.setTextSize(1);
       g_canvas.setTextColor(TFT_WHITE);
-      g_canvas.setTextDatum(middle_left);
-      String nm = s.name.substring(0, 9);
-      g_canvas.drawString(nm, 23, cy + ch / 2);
+      drawClippedString(s.name, 23, cy + ch / 2, 58, middle_left);
 
-      // 右侧工具/状态标签
+      // 右侧工具/状态胶囊 (x=84..128)
+      int pillX = 84, pillW = 44, pillY = cy + 3, pillH = 12;
+      g_canvas.fillRoundRect(pillX, pillY, pillW, pillH, 2, colSurfaceAlt());
       g_canvas.setFont(nullptr);
       g_canvas.setTextSize(1);
-      g_canvas.setTextDatum(middle_right);
+      g_canvas.setTextDatum(middle_center);
       if (isWait) {
+        g_canvas.drawRoundRect(pillX, pillY, pillW, pillH, 2, blink ? colCodex() : colBorder());
         g_canvas.setTextColor(blink ? colCodex() : TFT_WHITE);
-        g_canvas.drawString("WAIT!", SCR_W - 7, cy + ch / 2 + 1);
+        g_canvas.drawString("WAIT!", pillX + pillW / 2, pillY + pillH / 2 + 1);
       } else if (s.tool.length() > 0) {
         String tLabel = ">" + s.tool.substring(0, 5);
         g_canvas.setTextColor(colAmber());
-        g_canvas.drawString(tLabel, SCR_W - 7, cy + ch / 2 + 1);
+        g_canvas.drawString(tLabel, pillX + pillW / 2, pillY + pillH / 2 + 1);
       } else {
         const char* dots = ((millis() / 400) % 2 == 0) ? "RUN.." : "RUN.";
         g_canvas.setTextColor(colAmber());
-        g_canvas.drawString(dots, SCR_W - 7, cy + ch / 2 + 1);
+        g_canvas.drawString(dots, pillX + pillW / 2, pillY + pillH / 2 + 1);
       }
     }
 
@@ -1238,23 +1306,20 @@ static void drawSessionCardsOverlay() {
       int cy = baseY + i * 20;
       bool isWait = (i >= g_workCount);
       const String& nm = isWait ? g_waitNames[i - g_workCount] : g_workNames[i];
-      g_canvas.fillRoundRect(3, cy, SCR_W - 6, 18, 4, colSurface());
-      g_canvas.drawRoundRect(3, cy, SCR_W - 6, 18, 4, isWait ? colCodex() : colBorder());
+      drawCyberCard(3, cy, SCR_W - 6, 18, colSurface(), isWait ? colCodex() : colBorder(), colAmber());
       g_canvas.setFont(&fonts::efontCN_12);
       g_canvas.setTextColor(isWait ? colCodex() : TFT_WHITE);
-      g_canvas.setTextDatum(middle_left);
-      g_canvas.drawString(nm.substring(0, 10), 10, cy + 9);
+      drawClippedString(nm, 10, cy + 9, 110, middle_left);
     }
     return;
   }
 
-  // 空闲态: 若有最近完成任务, 顶部仅显示一条轻量胶囊
+  // 空闲态: 若有最近完成任务, 顶部仅显示一条轻量赛博胶囊
   if (g_histCount > 0) {
     const HistEntry& h = g_history[0];
     int pillH = 18;
     uint16_t agCol = agentColor(h.agent);
-    g_canvas.fillRoundRect(3, baseY, SCR_W - 6, pillH, 4, colSurfaceAlt());
-    g_canvas.drawRoundRect(3, baseY, SCR_W - 6, pillH, 4, colBorder());
+    drawCyberCard(3, baseY, SCR_W - 6, pillH, colSurfaceAlt(), colBorder(), agCol);
 
     g_canvas.fillRoundRect(6, baseY + 3, 11, 11, 2, agentDimColor(h.agent));
     g_canvas.setFont(nullptr);
@@ -1266,13 +1331,12 @@ static void drawSessionCardsOverlay() {
 
     g_canvas.setFont(&fonts::efontCN_12);
     g_canvas.setTextColor(colMuted());
-    g_canvas.setTextDatum(middle_left);
-    g_canvas.drawString(h.name.substring(0, 8), 21, baseY + 9);
+    drawClippedString(h.name, 21, baseY + 9, 58, middle_left);
 
     g_canvas.setFont(nullptr);
     g_canvas.setTextColor(colEmerald());
     g_canvas.setTextDatum(middle_right);
-    g_canvas.drawString(String("done ") + h.info, SCR_W - 7, baseY + 9);
+    g_canvas.drawString(String("OK ") + h.info.substring(0, 4), SCR_W - 7, baseY + 9);
   }
 }
 
@@ -1446,29 +1510,32 @@ static void presentCanvas() {
 }
 
 // ---------------------------------------------------------------------------
-// Page 2 (DETAIL): 多端会话卡片舱 + 最近完成记录 + RPG 等级与心情面板
+// Page 2 (DETAIL): 多端会话雷达舱 + 最近完成时间线 (彻底消除双列文字重叠!)
 // ---------------------------------------------------------------------------
 static void drawDetailContent() {
   uint32_t now = millis();
   int y = 20;
 
+  int cAct = 0, xAct = 0, pAct = 0;
+  getAgentActiveCounts(&cAct, &xAct, &pAct);
+
   g_canvas.setFont(nullptr);
   g_canvas.setTextSize(1);
-  g_canvas.setTextColor(colMuted(), TFT_BLACK);
+  g_canvas.setTextColor(colMuted());
   g_canvas.setTextDatum(top_left);
   char hdr[24];
   snprintf(hdr, sizeof(hdr), "SESSIONS (%d)", g_sessionCount);
   g_canvas.drawString(hdr, 5, y + 2);
 
-  g_canvas.setTextColor(colClaude(), TFT_BLACK);
-  g_canvas.drawString("C", SCR_W - 28, y + 2);
-  g_canvas.setTextColor(colCodex(), TFT_BLACK);
-  g_canvas.drawString("X", SCR_W - 18, y + 2);
-  g_canvas.setTextColor(colPi(), TFT_BLACK);
-  g_canvas.drawString("P", SCR_W - 8, y + 2);
+  // 右上角显示三端活跃数摘要
+  char agSum[20];
+  snprintf(agSum, sizeof(agSum), "C:%d X:%d P:%d", cAct, xAct, pAct);
+  g_canvas.setTextColor(colCodex());
+  g_canvas.setTextDatum(top_right);
+  g_canvas.drawString(agSum, SCR_W - 5, y + 2);
   y += 14;
 
-  int maxShow = 5;
+  int maxShow = 4;
   if (g_sessionCount > 0) {
     int pages = (g_sessionCount + maxShow - 1) / maxShow;
     if (g_detailScroll >= pages) g_detailScroll = 0;
@@ -1477,15 +1544,16 @@ static void drawDetailContent() {
 
     for (int i = startIdx; i < endIdx; i++) {
       SessionInfo& s = g_sessions[i];
-      int cardH = 26;
+      int cardH = 28;
       uint16_t stCol = stateColor(s.state);
       uint16_t agCol = agentColor(s.agent);
       uint16_t barCol = s.hasColor ? s.color : agCol;
 
-      g_canvas.fillRoundRect(3, y, SCR_W - 6, cardH, 4, colSurface());
-      g_canvas.drawRoundRect(3, y, SCR_W - 6, cardH, 4, (s.state == 'W') ? colCodex() : colBorder());
-      g_canvas.fillRoundRect(4, y + 3, 3, cardH - 6, 1, barCol);
+      drawCyberCard(3, y, SCR_W - 6, cardH, colSurface(),
+                    (s.state == 'W') ? colCodex() : colBorder(), agCol);
+      g_canvas.fillRoundRect(5, y + 3, 2, cardH - 6, 1, barCol);
 
+      // 平台微徽章 [C]/[X]/[P]
       g_canvas.fillRoundRect(9, y + 4, 12, 11, 2, agentDimColor(s.agent));
       g_canvas.setFont(nullptr);
       g_canvas.setTextSize(1);
@@ -1494,23 +1562,39 @@ static void drawDetailContent() {
       char agBuf[2] = { s.agent ? s.agent : 'C', '\0' };
       g_canvas.drawString(agBuf, 15, y + 9);
 
+      // 第一行左: 项目名称 (严格限制 56px 宽度 x=24..80, 绝不碰撞右侧胶囊!)
       g_canvas.setFont(&fonts::efontCN_12);
       g_canvas.setTextSize(1);
       g_canvas.setTextColor(TFT_WHITE);
-      g_canvas.setTextDatum(top_left);
-      g_canvas.drawString(s.name.substring(0, 9), 24, y + 2);
+      drawClippedString(s.name, 24, y + 2, 56, top_left);
 
+      // 第一行右: 工具/状态胶囊 (x=83..128)
+      int pillX = 83, pillW = 45, pillY = y + 3, pillH = 11;
+      g_canvas.fillRoundRect(pillX, pillY, pillW, pillH, 2, colSurfaceAlt());
       g_canvas.setFont(nullptr);
       g_canvas.setTextSize(1);
-      g_canvas.setTextDatum(top_right);
+      g_canvas.setTextDatum(middle_center);
       g_canvas.setTextColor(stCol);
       if (s.state == 'R' && s.tool.length() > 0) {
         String tl = ">" + s.tool.substring(0, 5);
-        g_canvas.drawString(tl, SCR_W - 7, y + 4);
+        g_canvas.drawString(tl, pillX + pillW / 2, pillY + pillH / 2 + 1);
       } else {
-        g_canvas.drawString(stateLabel(s.state), SCR_W - 7, y + 4);
+        g_canvas.drawString(stateLabel(s.state), pillX + pillW / 2, pillY + pillH / 2 + 1);
       }
 
+      // 第二行左 (x=24..84): 动态扫描进度条
+      int barX = 24, barY = y + 19, barW = 58, barH = 4;
+      g_canvas.fillRoundRect(barX, barY, barW, barH, 1, colSurfaceAlt());
+      if (s.state == 'R') {
+        int scanPos = ((now / 80) + i * 11) % (barW - 14);
+        g_canvas.fillRoundRect(barX + scanPos, barY, 14, barH, 1, agCol);
+      } else if (s.state == 'W') {
+        g_canvas.fillRoundRect(barX, barY, barW, barH, 1, colCodex());
+      } else if (s.state == 'D') {
+        g_canvas.fillRoundRect(barX, barY, barW, barH, 1, colEmerald());
+      }
+
+      // 第二行右 (x=86..127): 耗时
       uint32_t elapsed = s.durSec + (now - s.recvMs) / 1000;
       g_canvas.setTextColor(colMuted());
       g_canvas.setTextDatum(bottom_right);
@@ -1519,126 +1603,281 @@ static void drawDetailContent() {
       y += cardH + 3;
     }
   } else {
-    g_canvas.fillRoundRect(3, y, SCR_W - 6, 26, 4, colSurfaceAlt());
-    g_canvas.drawRoundRect(3, y, SCR_W - 6, 26, 4, colBorder());
+    drawCyberCard(3, y, SCR_W - 6, 32, colSurfaceAlt(), colBorder(), colCodex());
     g_canvas.setFont(nullptr);
     g_canvas.setTextColor(colMuted());
     g_canvas.setTextDatum(middle_center);
-    g_canvas.drawString("No active sessions", SCR_W / 2, y + 13);
-    y += 30;
+    g_canvas.drawString("No active sessions", SCR_W / 2, y + 16);
+    y += 36;
   }
 
-  if (y <= 135 && g_histCount > 0) {
-    y += 2;
+  // === 底部: 最近完成时间线卡片 (y: max(156, y+2) .. 229) ===
+  int histBoxY = max(y + 2, 156);
+  int histBoxH = 229 - histBoxY;
+  if (histBoxH >= 28) {
+    drawCyberCard(3, histBoxY, SCR_W - 6, histBoxH, colSurfaceAlt(), colBorder(), colEmerald());
     g_canvas.setFont(nullptr);
     g_canvas.setTextSize(1);
     g_canvas.setTextColor(colMuted());
     g_canvas.setTextDatum(top_left);
-    g_canvas.drawString("RECENT DONE", 5, y);
-    y += 11;
+    g_canvas.drawString("RECENT DONE", 8, histBoxY + 4);
 
-    for (int i = 0; i < g_histCount && y + 16 <= 178; i++) {
-      const HistEntry& h = g_history[i];
-      uint16_t agCol = agentColor(h.agent);
-      g_canvas.fillRoundRect(3, y, SCR_W - 6, 15, 3, colSurfaceAlt());
-      g_canvas.setFont(nullptr);
-      g_canvas.setTextColor(agCol);
-      g_canvas.setTextDatum(middle_left);
-      char agTag[4];
-      snprintf(agTag, sizeof(agTag), "%c", h.agent ? h.agent : 'C');
-      g_canvas.drawString(agTag, 7, y + 8);
+    char tdStr[14];
+    snprintf(tdStr, sizeof(tdStr), "TODAY:%d", g_todayDone);
+    g_canvas.setTextColor(colEmerald());
+    g_canvas.setTextDatum(top_right);
+    g_canvas.drawString(tdStr, SCR_W - 8, histBoxY + 4);
 
-      g_canvas.setFont(&fonts::efontCN_12);
-      g_canvas.setTextColor(TFT_WHITE);
-      g_canvas.drawString(h.name.substring(0, 8), 17, y + 7);
+    int hy = histBoxY + 15;
+    if (g_histCount == 0) {
+      g_canvas.setTextColor(colMuted());
+      g_canvas.setTextDatum(middle_center);
+      g_canvas.drawString("Waiting for tasks...", SCR_W / 2, histBoxY + histBoxH / 2 + 4);
+    } else {
+      for (int i = 0; i < g_histCount && (hy + 14) <= (histBoxY + histBoxH - 2); i++) {
+        const HistEntry& h = g_history[i];
+        uint16_t agCol = agentColor(h.agent);
+        g_canvas.fillRoundRect(7, hy + 1, 10, 10, 2, agentDimColor(h.agent));
+        g_canvas.setFont(nullptr);
+        g_canvas.setTextColor(agCol);
+        g_canvas.setTextDatum(middle_center);
+        char agTag[2] = { h.agent ? h.agent : 'C', '\0' };
+        g_canvas.drawString(agTag, 12, hy + 6);
 
-      g_canvas.setFont(nullptr);
-      g_canvas.setTextColor(colEmerald());
-      g_canvas.setTextDatum(middle_right);
-      g_canvas.drawString(h.info, SCR_W - 7, y + 8);
-      y += 17;
+        g_canvas.setFont(&fonts::efontCN_12);
+        g_canvas.setTextColor(TFT_WHITE);
+        drawClippedString(h.name, 20, hy + 6, 66, middle_left);
+
+        g_canvas.setFont(nullptr);
+        g_canvas.setTextColor(colEmerald());
+        g_canvas.setTextDatum(middle_right);
+        g_canvas.drawString(h.info.substring(0, 6), SCR_W - 8, hy + 6);
+        hy += 15;
+      }
     }
   }
-
-  // === 底部 RPG 养成 + 今日统计卡片 (y: 182..231) ===
-  int boxY = 182, boxH = 49;
-  g_canvas.fillRoundRect(3, boxY, SCR_W - 6, boxH, 5, colSurface());
-  g_canvas.drawRoundRect(3, boxY, SCR_W - 6, boxH, 5, colBorder());
-
-  // 左半: RPG 等级称号 + 当前讨伐 Bug Boss + 击杀数
-  g_canvas.setFont(nullptr);
-  g_canvas.setTextSize(1);
-  char lvTitle[20];
-  snprintf(lvTitle, sizeof(lvTitle), "Lv.%d %s", g_level, levelTitle(g_level));
-  g_canvas.setTextColor(colAmber());
-  g_canvas.setTextDatum(top_left);
-  g_canvas.drawString(lvTitle, 8, boxY + 5);
-
-  char bossStr[20];
-  snprintf(bossStr, sizeof(bossStr), "vs %s", kBossNames[g_bossIdx]);
-  g_canvas.setTextColor(colCoral());
-  g_canvas.drawString(bossStr, 8, boxY + 19);
-
-  g_canvas.setTextColor(colEmerald());
-  char sStr[20];
-  snprintf(sStr, sizeof(sStr), "Slain:%d OK:%d", g_bossKills, g_todayDone);
-  g_canvas.drawString(sStr, 8, boxY + 34);
-
-  // 右半: EXP 进度条 + BOSS HP 进度条
-  int mx = 74, mw = SCR_W - 82;
-  g_canvas.setTextColor(colPi());
-  g_canvas.setTextDatum(top_left);
-  g_canvas.drawString("EXP", mx, boxY + 5);
-  char expVal[8];
-  snprintf(expVal, sizeof(expVal), "%d%%", g_exp);
-  g_canvas.setTextDatum(top_right);
-  g_canvas.drawString(expVal, mx + mw, boxY + 5);
-
-  int eBarY = boxY + 15, barH = 6;
-  g_canvas.fillRoundRect(mx, eBarY, mw, barH, 2, colSurfaceAlt());
-  int eFill = (mw - 2) * g_exp / 100;
-  if (eFill > 1) g_canvas.fillRoundRect(mx + 1, eBarY + 1, eFill, barH - 2, 1, colPi());
-
-  g_canvas.setTextColor(colCoral());
-  g_canvas.setTextDatum(top_left);
-  g_canvas.drawString("BOSS", mx, boxY + 25);
-  char bVal[10];
-  int bossPct = (g_bossHp * 100) / max(1, g_bossMaxHp);
-  snprintf(bVal, sizeof(bVal), "%d%%", bossPct);
-  g_canvas.setTextDatum(top_right);
-  g_canvas.drawString(bVal, mx + mw, boxY + 25);
-
-  int mBarY = boxY + 35;
-  g_canvas.fillRoundRect(mx, mBarY, mw, barH, 2, colSurfaceAlt());
-  int mFill = (mw - 2) * constrain(bossPct, 0, 100) / 100;
-  if (mFill > 1) g_canvas.fillRoundRect(mx + 1, mBarY + 1, mFill, barH - 2, 1, colCoral());
 
   drawPageDots(1);
 }
 
 // ---------------------------------------------------------------------------
-// Page 3 (TOKEN): 算力能量站 (总览大卡 + 三端占比条 + IN/OUT/CACHE 进度条)
+// Page 3 (BOSS RAID & RPG): 像素深渊打怪竞技场 + 全宽 RPG 养成面板 + 技能键
+// ---------------------------------------------------------------------------
+// 8 大程序员 Bug Boss 的 12x10 像素精灵图 (1=身体主色, 每行低 12 位有效)
+static const uint16_t kBossSprites[BOSS_COUNT][10] = {
+  // 0: NullPtr (幽灵故障体)
+  { 0x03C0, 0x07E0, 0x0FF0, 0x0DB0, 0x0FF0, 0x0FF0, 0x0FF0, 0x0A50, 0x0990, 0x0420 },
+  // 1: RaceCond (双核狂暴眼)
+  { 0x0C30, 0x0660, 0x0FF0, 0x0990, 0x0FF0, 0x0BD0, 0x0FF0, 0x0660, 0x0C30, 0x0810 },
+  // 2: MemLeak (膨胀史莱姆)
+  { 0x0180, 0x03C0, 0x07E0, 0x0DB0, 0x0FF0, 0x0FF0, 0x0E70, 0x0FF0, 0x0FF0, 0x07E0 },
+  // 3: Heisenbug (量子闪烁魔方)
+  { 0x0FF0, 0x0810, 0x0BD0, 0x0A50, 0x0FF0, 0x0A50, 0x0BD0, 0x0810, 0x0FF0, 0x0660 },
+  // 4: Segfault (深渊骷髅王)
+  { 0x07E0, 0x0FF0, 0x0DB0, 0x0FF0, 0x07E0, 0x03C0, 0x05A0, 0x03C0, 0x0660, 0x0C30 },
+  // 5: MergeDmn (牛角冲突恶魔)
+  { 0x0810, 0x0C30, 0x0FF0, 0x0DB0, 0x0FF0, 0x07E0, 0x0FF0, 0x0A50, 0x0C30, 0x0420 },
+  // 6: Deadlock (死锁重装机甲)
+  { 0x03C0, 0x0FF0, 0x0DB0, 0x0FF0, 0x0FF0, 0x0C30, 0x0FF0, 0x0990, 0x0990, 0x0F0F },
+  // 7: LegacyCore (远古巨石核心)
+  { 0x03C0, 0x07E0, 0x0FF0, 0x0E70, 0x0DB0, 0x0E70, 0x0FF0, 0x07E0, 0x05A0, 0x0A50 }
+};
+
+static void drawPixelBoss(int cx, int cy, int bossIdx, bool hitFlash) {
+  uint32_t now = millis();
+  int bobY = ((now / 320) % 2 == 0) ? -1 : 1;
+  int shakeX = hitFlash ? (((now / 35) % 2 == 0) ? -3 : 3) : 0;
+
+  uint16_t kCols[BOSS_COUNT] = {
+    colCodex(), colAmber(), colEmerald(), colPi(),
+    colCoral(), colClaude(), colCodex(), colPi()
+  };
+  uint16_t bodyCol = hitFlash ? TFT_WHITE : kCols[bossIdx % BOSS_COUNT];
+  uint16_t eyeCol  = hitFlash ? colCoral() : TFT_WHITE;
+
+  int scale = 3;
+  int x0 = cx - (12 * scale) / 2 + shakeX;
+  int y0 = cy - (10 * scale) / 2 + bobY;
+
+  for (int r = 0; r < 10; r++) {
+    uint16_t mask = kBossSprites[bossIdx % BOSS_COUNT][r];
+    for (int c = 0; c < 12; c++) {
+      if (mask & (1 << (11 - c))) {
+        g_canvas.fillRect(x0 + c * scale, y0 + r * scale, scale, scale, bodyCol);
+      } else if (r == 3 && (c == 4 || c == 7)) {
+        // 发光像素双眼
+        g_canvas.fillRect(x0 + c * scale, y0 + r * scale, scale, scale, eyeCol);
+      }
+    }
+  }
+
+  // 受击时叠加炫酷交叉激光斩击特效 (X-Slash Beam)
+  if (hitFlash) {
+    g_canvas.drawLine(cx - 18, cy - 14, cx + 18, cy + 14, colAmber());
+    g_canvas.drawLine(cx - 17, cy - 14, cx + 19, cy + 14, TFT_WHITE);
+    g_canvas.drawLine(cx + 18, cy - 14, cx - 18, cy + 14, colCodex());
+    g_canvas.drawLine(cx + 17, cy - 14, cx - 19, cy + 14, TFT_WHITE);
+  }
+}
+
+static void drawSegmentedBar(int x, int y, int w, int h, int pct, uint16_t fillCol) {
+  g_canvas.fillRoundRect(x, y, w, h, 2, colSurfaceAlt());
+  g_canvas.drawRoundRect(x, y, w, h, 2, g_canvas.color565(32, 42, 62));
+  int fw = ((w - 2) * constrain(pct, 0, 100)) / 100;
+  if (fw > 1) {
+    g_canvas.fillRoundRect(x + 1, y + 1, fw, h - 2, 1, fillCol);
+    // 亮白高光顶线
+    g_canvas.drawFastHLine(x + 1, y + 1, fw, TFT_WHITE);
+  }
+  // 分段刻度线
+  for (int sx = x + w / 4; sx < x + w - 4; sx += w / 4) {
+    g_canvas.drawFastVLine(sx, y + 1, h - 2, colSurfaceAlt());
+  }
+}
+
+static void drawBossRaidView() {
+  uint32_t now = millis();
+  bool hitFlash = (now - g_bossHitMs) < 260;
+  bool fever    = (now < g_feverUntilMs);
+
+  // === 1. 顶部 Boss 竞技场大卡 (y: 20..112, h=92) ===
+  drawCyberCard(3, 20, SCR_W - 6, 92, colSurface(),
+                hitFlash ? TFT_WHITE : colBorder(), colCoral());
+
+  g_canvas.setFont(nullptr);
+  g_canvas.setTextSize(1);
+  char stageBuf[16];
+  snprintf(stageBuf, sizeof(stageBuf), "RAID #%d", g_bossKills + 1);
+  g_canvas.setTextColor(colAmber());
+  g_canvas.setTextDatum(top_left);
+  g_canvas.drawString(stageBuf, 8, 24);
+
+  char bossTitle[20];
+  snprintf(bossTitle, sizeof(bossTitle), "vs %s", kBossNames[g_bossIdx]);
+  g_canvas.setTextColor(colCoral());
+  g_canvas.setTextDatum(top_right);
+  g_canvas.drawString(bossTitle, SCR_W - 8, 24);
+
+  // 左侧 Boss 准星舱 (x=8..54, y=35..79)
+  int arenaX = 8, arenaY = 35, arenaW = 46, arenaH = 44;
+  g_canvas.fillRoundRect(arenaX, arenaY, arenaW, arenaH, 3, colSurfaceAlt());
+  g_canvas.drawRoundRect(arenaX, arenaY, arenaW, arenaH, 3, hitFlash ? colAmber() : g_canvas.color565(32, 42, 62));
+  drawPixelBoss(arenaX + arenaW / 2, arenaY + arenaH / 2, g_bossIdx, hitFlash);
+
+  // 右侧 Boss 血量与战况面板 (x=58..126)
+  int rx = 58, rw = SCR_W - 8 - rx;
+  g_canvas.setTextColor(colCoral());
+  g_canvas.setTextDatum(top_left);
+  g_canvas.drawString("HP", rx, 36);
+
+  char hpNums[16];
+  snprintf(hpNums, sizeof(hpNums), "%d/%d", g_bossHp, g_bossMaxHp);
+  g_canvas.setTextColor(TFT_WHITE);
+  g_canvas.setTextDatum(top_right);
+  g_canvas.drawString(hpNums, rx + rw, 36);
+
+  int bossPct = (g_bossHp * 100) / max(1, g_bossMaxHp);
+  drawSegmentedBar(rx, 46, rw, 8, bossPct, hitFlash ? colAmber() : colCoral());
+
+  char killStr[18];
+  snprintf(killStr, sizeof(killStr), "Slain: %d", g_bossKills);
+  g_canvas.setTextColor(colEmerald());
+  g_canvas.setTextDatum(top_left);
+  g_canvas.drawString(killStr, rx, 58);
+
+  int atkVal = 18 + g_level * 2;
+  if (fever) atkVal *= 2;
+  char atkStr[18];
+  snprintf(atkStr, sizeof(atkStr), fever ? "ATK:%d(2x)" : "ATK: %d", atkVal, atkVal);
+  g_canvas.setTextColor(fever ? colPi() : colCodex());
+  g_canvas.drawString(atkStr, rx, 69);
+
+  // 竞技场底部实时战报横幅 (y=83..107)
+  g_canvas.fillRoundRect(8, 83, SCR_W - 16, 23, 3, colSurfaceAlt());
+  g_canvas.drawRoundRect(8, 83, SCR_W - 16, 23, 3, hitFlash ? colAmber() : colBorder());
+  g_canvas.setFont(nullptr);
+  g_canvas.setTextColor(hitFlash ? colAmber() : colCodex());
+  g_canvas.setTextDatum(middle_center);
+  g_canvas.drawString(g_battleLog, SCR_W / 2, 95);
+
+  // === 2. 中部玩家全宽 RPG 属性卡 (y: 115..183, h=68, 绝无分列重叠!) ===
+  drawCyberCard(3, 115, SCR_W - 6, 68, colSurface(), colBorder(), colPi());
+
+  // 第一行: 等级称号 (左) + 连胜天数 (右)
+  char lvFull[22];
+  snprintf(lvFull, sizeof(lvFull), "Lv.%d %s", g_level, levelTitle(g_level));
+  g_canvas.setTextColor(colAmber());
+  g_canvas.setTextDatum(top_left);
+  g_canvas.drawString(lvFull, 8, 120);
+
+  char strkBuf[14];
+  snprintf(strkBuf, sizeof(strkBuf), "%dd streak", g_streakDays);
+  g_canvas.setTextColor(colClaude());
+  g_canvas.setTextDatum(top_right);
+  g_canvas.drawString(strkBuf, SCR_W - 8, 120);
+
+  // 第二行: 全宽 EXP 进度条
+  g_canvas.setTextColor(colPi());
+  g_canvas.setTextDatum(top_left);
+  g_canvas.drawString("EXP", 8, 133);
+  char expTxt[12];
+  snprintf(expTxt, sizeof(expTxt), "%d/100", g_exp);
+  g_canvas.setTextDatum(top_right);
+  g_canvas.drawString(expTxt, SCR_W - 8, 133);
+  drawSegmentedBar(8, 143, SCR_W - 16, 7, g_exp, colPi());
+
+  // 第三行: 全宽 MOOD 进度条
+  uint16_t mCol = (g_mood >= 70) ? colEmerald() : (g_mood >= 35) ? colAmber() : colCoral();
+  g_canvas.setTextColor(mCol);
+  g_canvas.setTextDatum(top_left);
+  g_canvas.drawString("MOOD", 8, 155);
+  char moodTxt[12];
+  snprintf(moodTxt, sizeof(moodTxt), "%d%%", g_mood);
+  g_canvas.setTextDatum(top_right);
+  g_canvas.drawString(moodTxt, SCR_W - 8, 155);
+  drawSegmentedBar(8, 165, SCR_W - 16, 7, g_mood, mCol);
+
+  // === 3. 底部三键交互技能槽 (y: 186..228, h=42) ===
+  const char* kBtnTop[3] = { "[A]",   "[2xA]", "[HOLD]" };
+  const char* kBtnBot[3] = { "SLASH", "GACHA", "HEAL"   };
+  uint16_t    kBtnCol[3] = { colCoral(), colPi(), colEmerald() };
+  for (int i = 0; i < 3; i++) {
+    int bx = 3 + i * 44;
+    int bw = 41, by = 187, bh = 40;
+    bool hi = (hitFlash && g_lastSkillHighlight == (i + 1));
+    drawCyberCard(bx, by, bw, bh, hi ? kBtnCol[i] : colSurface(),
+                  hi ? TFT_WHITE : colBorder(), kBtnCol[i]);
+    g_canvas.setFont(nullptr);
+    g_canvas.setTextSize(1);
+    g_canvas.setTextColor(hi ? TFT_BLACK : kBtnCol[i]);
+    g_canvas.setTextDatum(middle_center);
+    g_canvas.drawString(kBtnTop[i], bx + bw / 2, by + 13);
+    g_canvas.setTextColor(hi ? TFT_BLACK : TFT_WHITE);
+    g_canvas.drawString(kBtnBot[i], bx + bw / 2, by + 27);
+  }
+
+  drawPageDots(2);
+}
+
+// ---------------------------------------------------------------------------
+// Page 4 (TOKEN): 算力能量站 (总览大卡 + 三端占比条 + IN/OUT/CACHE 进度条)
 // ---------------------------------------------------------------------------
 static void drawTokBarRow(int y, const char* label, int64_t val, int64_t maxVal, uint16_t col) {
   g_canvas.setFont(nullptr);
   g_canvas.setTextSize(1);
   g_canvas.setTextColor(col);
   g_canvas.setTextDatum(top_left);
-  g_canvas.drawString(label, 7, y);
+  g_canvas.drawString(label, 8, y);
 
   char vBuf[12];
   fmtTok(val, vBuf, sizeof(vBuf));
   g_canvas.setTextColor(TFT_WHITE);
   g_canvas.setTextDatum(top_right);
-  g_canvas.drawString(vBuf, SCR_W - 7, y);
+  g_canvas.drawString(vBuf, SCR_W - 8, y);
 
-  int bx = 7, by = y + 11, bw = SCR_W - 14, bh = 6;
-  g_canvas.fillRoundRect(bx, by, bw, bh, 2, colSurfaceAlt());
-  if (val > 0 && maxVal > 0) {
-    int fw = (int)((int64_t)bw * val / maxVal);
-    fw = constrain(fw, 3, bw);
-    g_canvas.fillRoundRect(bx, by, fw, bh, 2, col);
-  }
+  int pct = (val > 0 && maxVal > 0) ? (int)((val * 100LL) / maxVal) : 0;
+  if (val > 0 && pct < 4) pct = 4;
+  drawSegmentedBar(8, y + 11, SCR_W - 16, 7, pct, col);
 }
 
 static void drawTokView() {
@@ -1665,8 +1904,7 @@ static void drawTokView() {
   y += 14;
 
   // 1. Hero 总量卡片 (y: 34..82)
-  g_canvas.fillRoundRect(3, y, SCR_W - 6, 48, 5, colSurface());
-  g_canvas.drawRoundRect(3, y, SCR_W - 6, 48, 5, colBorder());
+  drawCyberCard(3, y, SCR_W - 6, 48, colSurface(), colBorder(), colAmber());
 
   char totalBuf[14];
   fmtTok(total, totalBuf, sizeof(totalBuf));
@@ -1688,8 +1926,7 @@ static void drawTokView() {
   y += 52;
 
   // 2. 三端算力占比卡片 (Claude / Codex / Pi) (y: 86..136)
-  g_canvas.fillRoundRect(3, y, SCR_W - 6, 50, 5, colSurface());
-  g_canvas.drawRoundRect(3, y, SCR_W - 6, 50, 5, colBorder());
+  drawCyberCard(3, y, SCR_W - 6, 50, colSurface(), colBorder(), colCodex());
 
   g_canvas.setFont(nullptr);
   g_canvas.setTextColor(colMuted());
@@ -1729,15 +1966,14 @@ static void drawTokView() {
   y += 55;
 
   // 3. IN / OUT / CACHE 进度条明细 (y: 141..231)
-  g_canvas.fillRoundRect(3, y, SCR_W - 6, 90, 5, colSurface());
-  g_canvas.drawRoundRect(3, y, SCR_W - 6, 90, 5, colBorder());
+  drawCyberCard(3, y, SCR_W - 6, 90, colSurface(), colBorder(), colPi());
 
   int64_t maxBar = max((int64_t)1, max(g_tokIn, max(g_tokOut, g_tokCache)));
   drawTokBarRow(y + 7,  "INPUT",  g_tokIn,    maxBar, colAmber());
   drawTokBarRow(y + 35, "OUTPUT", g_tokOut,   maxBar, colEmerald());
   drawTokBarRow(y + 63, "CACHE",  g_tokCache, maxBar, colCodex());
 
-  drawPageDots(2);
+  drawPageDots(3);
 }
 
 // ---------------------------------------------------------------------------
@@ -2178,10 +2414,10 @@ void loop() {
   pollSave();
   stepSparkline();
 
-  // BtnB: 三页循环切换 MAIN -> DETAIL -> TOKEN -> MAIN
+  // BtnB: 四页循环切换 MAIN -> DETAIL -> BOSS -> TOKEN -> MAIN
   if (M5.BtnB.wasPressed()) {
     Page prev = g_page;
-    g_page = (Page)(((int)g_page + 1) % 3);
+    g_page = (Page)(((int)g_page + 1) % 4);
     if (g_page == Page::MAIN) {
       openGifForState();
     } else {
@@ -2194,7 +2430,7 @@ void loop() {
   case Page::DETAIL: {
     static uint32_t lastDetailRefresh = 0;
     uint32_t tnow = millis();
-    if (tnow - lastDetailRefresh >= 1000) {
+    if (tnow - lastDetailRefresh >= 250) {
       lastDetailRefresh = tnow;
       g_detailDirty = true;
     }
@@ -2206,12 +2442,50 @@ void loop() {
       g_detailDirty = false;
     }
     if (M5.BtnA.wasPressed()) {
-      int maxShow = 5;
+      int maxShow = 4;
       int pages = (g_sessionCount + maxShow - 1) / maxShow;
       if (pages > 1) {
         g_detailScroll = (g_detailScroll + 1) % pages;
         g_detailDirty = true;
       }
+    }
+    break;
+  }
+
+  case Page::BOSS: {
+    // 像素打怪竞技场: ~16 FPS 实时动画 + BtnA 斩击/扭蛋/充能
+    static uint32_t lastBossFrame = 0;
+    uint32_t tnow = millis();
+    if (M5.BtnA.wasHold()) {
+      g_lastSkillHighlight = 3;
+      g_mood = min(100, g_mood + 25);
+      addExp(20);
+      g_bossHitMs = tnow;
+      snprintf(g_battleLog, sizeof(g_battleLog), "HEAL! +25 MOOD +20XP");
+      g_detailDirty = true;
+    } else if (M5.BtnA.wasClicked()) {
+      bool isDouble = (tnow - g_lastBtnAClickMs) <= 450;
+      g_lastBtnAClickMs = tnow;
+      if (isDouble) {
+        g_lastSkillHighlight = 2;
+        g_feverUntilMs = tnow + 180000UL;
+        addExp(30);
+        hitBoss(75, true);
+        snprintf(g_battleLog, sizeof(g_battleLog), "ULTIMATE! 2xATK + CRIT!");
+      } else {
+        g_lastSkillHighlight = 1;
+        addExp(5);
+        hitBoss(18 + g_level * 2, false);
+      }
+      g_detailDirty = true;
+    }
+    if (g_detailDirty || (tnow - lastBossFrame >= 80)) {
+      lastBossFrame = tnow;
+      g_canvas.fillScreen(TFT_BLACK);
+      drawStatusBarOverlay();
+      drawBossRaidView();
+      g_canvas.pushSprite(0, 0);
+      g_detailDirty = false;
     }
     break;
   }
